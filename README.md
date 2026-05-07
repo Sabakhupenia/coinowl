@@ -118,6 +118,12 @@ The empty subpackages are deliberate — they make the architecture visible from
 - **v3** — quota enforcement (10 questions/day per Telegram user); `/alerts` subscriptions ("ping me when BTC crosses $X").
 - **Later** — proper mascot artwork; user-account features (scraping public Telegram channels for sentiment) that justified picking Telethon over `python-telegram-bot`.
 
+## Data attribution
+
+Price and market data are provided by [CoinGecko](https://www.coingecko.com). CoinGecko's [attribution guide](https://brand.coingecko.com/resources/attribution-guide) requires this credit to appear visibly anywhere their data is displayed; bot replies that surface CoinGecko data include the same line.
+
+The free public tier is rate-limited (~5 req/min from residential IPs). Set `COINGECKO_API_KEY` in `.env` to use CoinGecko's free demo plan (~30 req/min) — sign up at <https://www.coingecko.com/en/api/pricing>.
+
 ## Status
 
 Pre-alpha. Single developer. All rights reserved.

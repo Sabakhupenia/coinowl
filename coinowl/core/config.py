@@ -19,6 +19,7 @@ class Settings:
     telegram_api_id: int
     telegram_api_hash: str
     telegram_bot_token: str
+    coingecko_api_key: str | None  # demo plan key, optional
 
 
 def _require(name: str) -> str:
@@ -29,6 +30,11 @@ def _require(name: str) -> str:
             f"Copy .env.example to .env and fill it in."
         )
     return value
+
+
+def _optional(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
 
 
 def load_settings() -> Settings:
@@ -44,4 +50,5 @@ def load_settings() -> Settings:
         telegram_api_id=api_id,
         telegram_api_hash=_require("TELEGRAM_API_HASH"),
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
+        coingecko_api_key=_optional("COINGECKO_API_KEY"),
     )
