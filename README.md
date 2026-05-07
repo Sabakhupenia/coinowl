@@ -4,6 +4,14 @@ A Telegram bot for crypto analytics that knows when to talk and when to draw.
 
 Ask CoinOwl a question on Telegram. An LLM router decides whether the answer fits in a chat reply (e.g. "what's BTC right now?" → text with emoji-formatted stats) or whether you really wanted a chart (e.g. "show me ETH vs SOL over the last 30 days" → Plotly chart sent as a PNG inline). Charts are delivered in-chat — no dashboard, no separate web app. If you want to drill into a chart (zoom, hover, toggle traces), `/interactive` re-renders it as a downloadable HTML file.
 
+## ⚠️ Not financial advice
+
+CoinOwl provides statistics, historical data, and charts only. It does **not** make price predictions, give buy/sell signals, or offer investment advice. CoinOwl is not a financial advisor and is not licensed to give one.
+
+Cryptocurrency markets are volatile and you can lose money. Any trading or investment decisions are your own — do your own research and, if you're putting meaningful money on the line, consult a licensed financial advisor.
+
+CoinOwl is a tool for analysis. The analysis is on you.
+
 ## Mascot
 
 The owl: night vision, patient, picks its moment. Sees the chart you should be looking at instead of the one you're staring at. The 🦉 emoji is the v0 logo — proper artwork lands when there's something worth branding.
@@ -50,6 +58,7 @@ No web dashboard, no Telegram Login Widget — every interaction lives inside th
 - `/start` — greet and explain what the bot does
 - `/help` — list available commands and the current bot version
 - `/version` — print the bot version
+- `/disclaimer` — read the full "not financial advice" notice
 - `/interactive` — re-render the most recent chart as an interactive HTML file (slower but pannable/zoomable)
 - *(any non-command message)* — routed to the LLM for a text reply or chart
 
