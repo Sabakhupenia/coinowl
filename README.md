@@ -2,7 +2,7 @@
 
 A Telegram bot for crypto analytics that knows when to talk and when to draw.
 
-Ask CoinOwl a question on Telegram. An LLM router decides whether the answer fits in a chat reply (e.g. "what's BTC right now?") or whether you really wanted a chart (e.g. "show me ETH vs SOL over the last 30 days"). Time-series and comparative questions get a deep link to a Streamlit dashboard pre-loaded with exactly the view you asked for. Simple lookups get answered inline.
+Ask CoinOwl a question on Telegram. An LLM router decides whether the answer fits in a chat reply (e.g. "what's BTC right now?" → text with emoji-formatted stats) or whether you really wanted a chart (e.g. "show me ETH vs SOL over the last 30 days" → Plotly chart sent as a PNG inline). Charts are delivered in-chat — no dashboard, no separate web app. If you want to drill into a chart (zoom, hover, toggle traces), `/interactive` re-renders it as a downloadable HTML file.
 
 ## Mascot
 
@@ -14,18 +14,20 @@ The owl: night vision, patient, picks its moment. Sees the chart you should be l
 flowchart LR
     U([User]) -->|message| B[CoinOwl Bot<br/>Telethon]
     B --> A{Gemini Flash<br/>router}
-    A -->|inline answer| G[Groq<br/>gpt-oss-120b]
-    A -->|chart / time-series| L[Deep link]
-    A -.->|fallback| C[Claude]
+    A -->|"text + stats"| G[Groq<br/>gpt-oss-120b]
+    A -->|"chart"| CH[Plotly<br/>chart builder]
+    A -.->|"fallback"| C[Claude]
     G --> B
-    L --> D[Streamlit Dashboard]
-    D --> CG[(CoinGecko)]
-    D --> P[(Postgres<br/>+ pgvector)]
-    B -.->|log query + embedding| P
+    CH -->|PNG inline| B
+    CH -.->|HTML on /interactive| B
+    B --> CG[(CoinGecko)]
+    B -.->|log + embedding| P[(Postgres<br/>+ pgvector)]
     B --> U
 ```
 
-The router is the hinge. Gemini Flash sees the user's message, decides the route, and either returns a text reply (delegated to Groq for generation) or emits a deep link with the parameters needed to render the right Streamlit view. Claude is the fallback when Gemini errors or refuses. Every query is logged with its embedding for the future "find coins behaving like this" feature.
+The router is the hinge. Gemini Flash sees the user's message and picks one of two routes: **text-with-stats** (delegated to Groq, formatted with emoji to feel native in chat) or **chart** (Plotly figure exported to PNG and sent inline via Telethon). Claude is the fallback when Gemini errors. Every query is logged with its embedding for the future "find coins behaving like this" feature.
+
+By default chart messages send a PNG — instant, mobile-friendly, renders directly in the chat scroll. Users who want interactivity send `/interactive` as a follow-up; the bot re-renders the most recent chart as a self-contained Plotly HTML file (pannable, zoomable, hoverable). Telegram delivers the HTML as a downloadable document; mobile clients open it inline in a webview, desktop hands it to the system browser.
 
 ## Stack
 
@@ -35,10 +37,21 @@ The router is the hinge. Gemini Flash sees the user's message, decides the route
 | Router       | Gemini Flash                      | Cheap + fast tool-calling for a routing decision             |
 | Text replies | Groq `gpt-oss-120b`               | Sub-second latency for chat-style answers                    |
 | Fallback     | Claude                            | Reliable when the primary router has a bad day               |
-| Dashboard    | Streamlit                         | Deep-linkable via `st.query_params`, zero-frontend overhead  |
+| Charts       | Plotly + kaleido                  | PNG inline by default; HTML on `/interactive` for drill-in   |
 | Data         | CoinGecko free API                | Good enough for v1; revisit when rate limits bite            |
 | Storage      | Postgres + pgvector               | Query log + embeddings in one place, no separate vector DB   |
-| Auth (v3)    | Telegram Login Widget             | Reuses the identity the user already has                     |
+
+No web dashboard, no Telegram Login Widget — every interaction lives inside the chat, and the user is already authenticated by the fact that Telegram tells the bot their `user_id`.
+
+## Commands
+
+> Currently the bot is in **v0 echo mode** — any message gets echoed back. The surface below lands incrementally as v1 work progresses.
+
+- `/start` — greet and explain what the bot does
+- `/help` — list available commands and the current bot version
+- `/version` — print the bot version
+- `/interactive` — re-render the most recent chart as an interactive HTML file (slower but pannable/zoomable)
+- *(any non-command message)* — routed to the LLM for a text reply or chart
 
 ## Setup
 
@@ -73,9 +86,9 @@ Send a message to your bot on Telegram. You should get back `🦉 echo: <your te
 coinowl/
 ├── coinowl/
 │   ├── core/          # config, logging — cross-cutting utilities
-│   ├── bot/           # Telethon client + handlers
+│   ├── bot/           # Telethon client + message handlers + commands
 │   ├── agent/         # (placeholder) LLM router + tool calls
-│   ├── dashboard/     # (placeholder) Streamlit app
+│   ├── charts/        # (placeholder) Plotly figure builders + PNG/HTML export
 │   ├── data/          # (placeholder) CoinGecko + other sources
 │   └── db/            # (placeholder) Postgres + pgvector models
 ├── tests/
@@ -90,11 +103,11 @@ The empty subpackages are deliberate — they make the architecture visible from
 
 ## Roadmap
 
-- **v0 (today)** — repo scaffold, Telethon echo bot, README. The Telegram pipe works end-to-end.
-- **v1** — CoinGecko client; Gemini Flash router; Groq for text replies; Streamlit dashboard with deep links via `st.query_params`; Claude fallback.
-- **v2** — Postgres + pgvector. Log every query and its embedding; "find coins behaving like X" search.
-- **v3** — Telegram Login Widget on the dashboard (verify the HMAC-signed user payload server-side using the bot token); 10 questions/day quota per Telegram user.
-- **Later** — proper mascot artwork; alert subscriptions ("ping me when BTC crosses $X"); user-account features that justified picking Telethon over `python-telegram-bot`.
+- **v0 (done)** — repo scaffold, Telethon echo bot, README. The Telegram pipe works end-to-end.
+- **v1** — `/start`, `/help`, `/version` commands; CoinGecko client; Gemini Flash router; Groq text replies with emoji-formatted stats; Plotly → PNG charts sent inline; `/interactive` follow-up that re-renders the last chart as HTML; Claude fallback.
+- **v2** — Postgres + pgvector. Log every query and its embedding. `/similar <coin>` finds coins whose recent price behavior resembles the query.
+- **v3** — quota enforcement (10 questions/day per Telegram user); `/alerts` subscriptions ("ping me when BTC crosses $X").
+- **Later** — proper mascot artwork; user-account features (scraping public Telegram channels for sentiment) that justified picking Telethon over `python-telegram-bot`.
 
 ## Status
 
