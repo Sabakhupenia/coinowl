@@ -40,7 +40,19 @@ ATTRIBUTION = "Data: CoinGecko (https://www.coingecko.com)"
 
 
 class CoinGeckoError(RuntimeError):
-    """Raised on non-2xx responses, network failures, or unexpected payload shapes."""
+    """Base class for all CoinGecko client errors."""
+
+
+class CoinGeckoNetworkError(CoinGeckoError):
+    """Raised when the request never reached CoinGecko (timeout, DNS, TCP)."""
+
+
+class CoinGeckoRateLimitError(CoinGeckoError):
+    """Raised on HTTP 429 — caller should back off, not retry immediately."""
+
+
+class CoinGeckoUnknownCoinError(CoinGeckoError):
+    """Raised when CoinGecko's response doesn't include the requested coin id."""
 
 
 @dataclass(frozen=True)
@@ -98,6 +110,9 @@ class CoinGeckoClient:
             "/simple/price",
             params={"ids": coin_id, "vs_currencies": vs_currency},
         )
+        if coin_id not in payload:
+            # CoinGecko returns {} for unknown ids rather than 404.
+            raise CoinGeckoUnknownCoinError(coin_id)
         try:
             price = float(payload[coin_id][vs_currency])
         except (KeyError, TypeError, ValueError) as exc:
@@ -161,7 +176,9 @@ class CoinGeckoClient:
         try:
             resp = await self._client.get(path, params=params)
         except httpx.HTTPError as exc:
-            raise CoinGeckoError(f"GET {path} failed: {exc}") from exc
+            raise CoinGeckoNetworkError(f"GET {path} failed: {exc}") from exc
+        if resp.status_code == 429:
+            raise CoinGeckoRateLimitError(resp.text[:200])
         if resp.status_code >= 400:
             raise CoinGeckoError(
                 f"GET {path} returned {resp.status_code}: {resp.text[:200]}"
