@@ -1,15 +1,17 @@
 """CoinOwl Telegram bot.
 
-v0.3.0 surface:
+v0.3.1 surface:
   /start, /help, /version, /disclaimer — informational
   /price <symbol>                       — current spot price via CoinGecko
   (any other text)                      — routed to the LLM agent
                                           (Gemini Flash → Claude Haiku 4.5 fallback)
+  identity questions ("what can you do") — answered locally, no API call
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 
 from telethon import TelegramClient, events
 
@@ -100,6 +102,12 @@ def _build_client(settings: Settings) -> TelegramClient:
     )
 
 
+_IDENTITY_RE = re.compile(
+    r"\b(what (can|do) you do|who are you|what are you|how (do|can) (i|you) use)\b",
+    re.IGNORECASE,
+)
+
+
 def _is_not_command(event: events.NewMessage.Event) -> bool:
     # Slash-commands have dedicated handlers; everything else goes to the LLM.
     return not (event.raw_text or "").startswith("/")
@@ -172,6 +180,9 @@ async def _amain() -> None:
             if not text:
                 return  # ignore stickers / empty / media-only messages
             log.info("chat from {}: {!r}", event.sender_id, text)
+            if _IDENTITY_RE.search(text):
+                await event.reply(_HELP_TEXT)
+                return
             async with client.action(event.chat_id, "typing"):
                 reply_text = await agent.reply(text)
             await event.reply(reply_text)

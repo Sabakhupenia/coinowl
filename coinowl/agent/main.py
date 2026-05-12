@@ -39,6 +39,18 @@ log = get_logger(__name__)
 
 _GEMINI_MODEL = "gemini-2.5-flash"
 _CLAUDE_MODEL = "claude-haiku-4-5"
+
+_SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(prices: list[float], buckets: int = 8) -> str:
+    if not prices:
+        return ""
+    lo, hi = min(prices), max(prices)
+    span = hi - lo or 1
+    step = max(1, len(prices) // buckets)
+    sampled = [prices[i] for i in range(0, len(prices), step)][:buckets]
+    return "".join(_SPARKLINE_BLOCKS[round((p - lo) / span * 7)] for p in sampled)
 _MAX_TOOL_ITERATIONS = 5
 _MAX_OUTPUT_TOKENS = 2048
 
@@ -129,6 +141,7 @@ async def execute_tool(
             "last_price_usd": last.price,
             "change_pct": round(change_pct, 2),
             "point_count": len(points),
+            "sparkline": _sparkline([p.price for p in points]),
             "attribution": ATTRIBUTION,
         }
 
