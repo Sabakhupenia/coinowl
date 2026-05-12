@@ -81,8 +81,8 @@ Where to get the secrets:
 
 - **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** — log into <https://my.telegram.org>, create an application, copy the values. Telethon needs these even when running as a bot (a difference from `python-telegram-bot`).
 - **`TELEGRAM_BOT_TOKEN`** — message [@BotFather](https://t.me/BotFather), `/newbot`, follow the prompts. The token he hands back goes here.
-- **`GEMINI_API_KEY`** — get from <https://aistudio.google.com/apikey>. This is the primary LLM that powers natural-language chat.
-- **`ANTHROPIC_API_KEY`** — get from <https://console.anthropic.com/settings/keys>. Used as the fallback when Gemini errors.
+- **`GEMINI_API_KEY`** — get from <https://aistudio.google.com/apikey>. This is the primary LLM that powers natural-language chat. Free tier covers reasonable usage.
+- **`ANTHROPIC_API_KEY`** (optional) — get from <https://console.anthropic.com/settings/keys>. Used as the fallback when Gemini errors. Leave blank to run Gemini-only; Anthropic's API requires paid credits.
 - **`COINGECKO_API_KEY`** (optional) — see [Data attribution](#data-attribution) below.
 
 Then:

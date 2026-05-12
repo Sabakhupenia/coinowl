@@ -21,8 +21,8 @@ from google import genai
 from google.genai import types as genai_types
 
 from coinowl.agent.prompts import (
-    BOTH_PROVIDERS_FAILED,
     GUARDRAIL_REFUSAL,
+    PROVIDER_FAILED,
     SYSTEM_PROMPT,
 )
 from coinowl.core.logging import get_logger
@@ -349,22 +349,31 @@ class Agent:
         self,
         *,
         gemini_api_key: str,
-        anthropic_api_key: str,
+        anthropic_api_key: str | None,
         coingecko: CoinGeckoClient,
     ) -> None:
         self._gemini = GeminiProvider(gemini_api_key, coingecko)
-        self._claude = ClaudeProvider(anthropic_api_key, coingecko)
+        self._claude: ClaudeProvider | None = (
+            ClaudeProvider(anthropic_api_key, coingecko)
+            if anthropic_api_key
+            else None
+        )
+        if self._claude is None:
+            log.info("ANTHROPIC_API_KEY not set — running Gemini-only (no fallback)")
 
     async def reply(self, user_text: str) -> str:
         try:
             text = await self._gemini.chat(user_text)
         except Exception as exc:  # noqa: BLE001 — broad catch is the fallback contract
-            log.warning("Gemini failed: %s; falling back to Claude", exc)
+            log.warning("Gemini failed: %s", exc)
+            if self._claude is None:
+                return PROVIDER_FAILED
+            log.info("Falling back to Claude")
             try:
                 text = await self._claude.chat(user_text)
             except Exception as exc2:  # noqa: BLE001
                 log.error("Both LLMs failed: gemini=%s claude=%s", exc, exc2)
-                return BOTH_PROVIDERS_FAILED
+                return PROVIDER_FAILED
 
         if not text:
             return "🦉 (I had no reply for that — try rephrasing?)"

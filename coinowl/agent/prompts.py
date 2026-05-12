@@ -48,7 +48,6 @@ GUARDRAIL_REFUSAL = (
 )
 
 
-BOTH_PROVIDERS_FAILED = (
-    "🦉 I'm having trouble thinking right now — both my models are unhappy. "
-    "Try again in a moment."
+PROVIDER_FAILED = (
+    "🦉 I'm having trouble thinking right now. Try again in a moment."
 )
