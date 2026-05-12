@@ -227,7 +227,17 @@ async def _amain() -> None:
             reply_text = result.text
             if remaining <= 3:
                 reply_text += f"\n\n_({remaining} question{'s' if remaining != 1 else ''} remaining in this 3-hour window)_"
-            await event.reply(reply_text)
+            if result.chart_png:
+                import io
+                await client.send_file(
+                    event.chat_id,
+                    io.BytesIO(result.chart_png),
+                    caption=reply_text,
+                    reply_to=event.id,
+                    force_document=False,
+                )
+            else:
+                await event.reply(reply_text)
 
         await client.start(bot_token=settings.telegram_bot_token)
         log.info("CoinOwl bot is up. Send it a message on Telegram.")

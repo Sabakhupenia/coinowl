@@ -34,6 +34,7 @@ from coinowl.data.coingecko import (
     CoinGeckoRateLimitError,
     CoinGeckoUnknownCoinError,
 )
+from coinowl.charts.plotly_chart import generate_price_chart
 from coinowl.data.symbols import resolve
 
 log = get_logger(__name__)
@@ -157,6 +158,54 @@ async def execute_tool(
             "attribution": ATTRIBUTION,
         }
 
+    if tool_name == "get_chart":
+        symbol = str(args.get("symbol", "")).strip()
+        try:
+            days = int(args.get("days", 7))
+        except (TypeError, ValueError):
+            return {"error": "Argument 'days' must be an integer"}
+        if not symbol:
+            return {"error": "Missing required argument: symbol"}
+        if days not in (1, 7, 30, 90):
+            days = max(1, min(90, days))
+
+        coin_id = resolve(symbol)
+        try:
+            points = await cg.get_market_chart(coin_id, days=days)
+        except CoinGeckoUnknownCoinError:
+            return {"error": f"Unknown coin: {symbol!r}", "symbol": symbol}
+        except CoinGeckoRateLimitError:
+            return {"error": "CoinGecko is rate-limiting; back off and try later"}
+        except CoinGeckoError as exc:
+            log.warning("get_chart failed for {}: {}", coin_id, exc)
+            return {"error": "CoinGecko request failed; try again"}
+
+        if not points:
+            return {"error": "No data returned", "symbol": symbol}
+
+        first, last = points[0], points[-1]
+        change_pct = (last.price - first.price) / first.price * 100 if first.price else 0.0
+
+        try:
+            png_bytes = await generate_price_chart(symbol.upper(), points, days)
+        except Exception as exc:
+            log.warning("Chart render failed for {}: {}", symbol, exc)
+            return {"error": "Chart generation failed; try again"}
+
+        if side_effects is not None:
+            side_effects["chart_png"] = png_bytes
+            side_effects["chart_context"] = {"symbol": symbol.upper(), "days": days}
+
+        return {
+            "chart": "ready",
+            "symbol": symbol.upper(),
+            "days": days,
+            "first_price_usd": first.price,
+            "last_price_usd": last.price,
+            "change_pct": round(change_pct, 2),
+            "attribution": ATTRIBUTION,
+        }
+
     return {"error": f"Unknown tool: {tool_name}"}
 
 
@@ -186,6 +235,27 @@ _GEMINI_TOOLS = genai_types.Tool(
             description=(
                 "Get historical price points for a cryptocurrency over the last N days. "
                 "Returns first/last prices and percent change."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "symbol": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Ticker or CoinGecko coin id.",
+                    ),
+                    "days": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="Lookback window: 1, 7, 30, or 90.",
+                    ),
+                },
+                required=["symbol", "days"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_chart",
+            description=(
+                "Generate and send a PNG price chart image. "
+                "Call this when the user explicitly asks for a chart, graph, or plot."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -285,6 +355,27 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
         "description": (
             "Get historical price points for a cryptocurrency over the last N days. "
             "Returns first/last prices and percent change."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Ticker or CoinGecko coin id.",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "Lookback window: 1, 7, 30, or 90.",
+                },
+            },
+            "required": ["symbol", "days"],
+        },
+    },
+    {
+        "name": "get_chart",
+        "description": (
+            "Generate and send a PNG price chart image. "
+            "Call this when the user explicitly asks for a chart, graph, or plot."
         ),
         "input_schema": {
             "type": "object",
