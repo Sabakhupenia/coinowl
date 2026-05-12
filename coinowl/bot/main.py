@@ -156,7 +156,7 @@ async def _amain() -> None:
                 )
                 return
             except (CoinGeckoNetworkError, CoinGeckoError) as exc:
-                log.warning("CoinGecko call failed for %s: %s", coin_id, exc)
+                log.warning("CoinGecko call failed for {}: {}", coin_id, exc)
                 await event.reply("Couldn't reach CoinGecko just now. Try again in a moment.")
                 return
 
@@ -171,7 +171,7 @@ async def _amain() -> None:
             text = (event.raw_text or "").strip()
             if not text:
                 return  # ignore stickers / empty / media-only messages
-            log.info("chat from %s: %r", event.sender_id, text)
+            log.info("chat from {}: {!r}", event.sender_id, text)
             async with client.action(event.chat_id, "typing"):
                 reply_text = await agent.reply(text)
             await event.reply(reply_text)

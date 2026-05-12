@@ -83,7 +83,7 @@ async def execute_tool(
         except CoinGeckoRateLimitError:
             return {"error": "CoinGecko is rate-limiting; back off and try later"}
         except CoinGeckoError as exc:
-            log.warning("get_price failed for %s: %s", coin_id, exc)
+            log.warning("get_price failed for {}: {}", coin_id, exc)
             return {"error": "CoinGecko request failed; try again"}
         return {
             "symbol": symbol.upper(),
@@ -111,7 +111,7 @@ async def execute_tool(
         except CoinGeckoRateLimitError:
             return {"error": "CoinGecko is rate-limiting; back off and try later"}
         except CoinGeckoError as exc:
-            log.warning("get_market_chart failed for %s: %s", coin_id, exc)
+            log.warning("get_market_chart failed for {}: {}", coin_id, exc)
             return {"error": "CoinGecko request failed; try again"}
 
         if not points:
@@ -314,7 +314,7 @@ class ClaudeProvider:
                 ).strip()
 
             if response.stop_reason != "tool_use":
-                log.warning("Claude returned unexpected stop_reason: %s", response.stop_reason)
+                log.warning("Claude returned unexpected stop_reason: {}", response.stop_reason)
                 return next(
                     (b.text for b in response.content if b.type == "text"),
                     "",
@@ -365,21 +365,21 @@ class Agent:
         try:
             text = await self._gemini.chat(user_text)
         except Exception as exc:  # noqa: BLE001 — broad catch is the fallback contract
-            log.warning("Gemini failed: %s", exc)
+            log.warning("Gemini failed: {}", exc)
             if self._claude is None:
                 return PROVIDER_FAILED
             log.info("Falling back to Claude")
             try:
                 text = await self._claude.chat(user_text)
             except Exception as exc2:  # noqa: BLE001
-                log.error("Both LLMs failed: gemini=%s claude=%s", exc, exc2)
+                log.error("Both LLMs failed: gemini={} claude={}", exc, exc2)
                 return PROVIDER_FAILED
 
         if not text:
             return "🦉 (I had no reply for that — try rephrasing?)"
 
         if not passes_guardrail(text):
-            log.warning("Guardrail tripped on model output: %r", text[:200])
+            log.warning("Guardrail tripped on model output: {!r}", text[:200])
             return GUARDRAIL_REFUSAL
 
         return text

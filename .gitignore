@@ -60,6 +60,9 @@ coverage.xml
 # Claude Code session state and local settings
 .claude/
 
+# Log files
+logs/
+
 # OS
 .DS_Store
 Thumbs.db
