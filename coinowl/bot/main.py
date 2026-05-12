@@ -19,6 +19,7 @@ from coinowl import __version__
 from coinowl.agent import Agent
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
+from coinowl.core.quota import QuotaTracker
 from coinowl.data.coingecko import (
     ATTRIBUTION,
     CoinGeckoClient,
@@ -43,6 +44,8 @@ _START_TEXT = (
     "\n"
     "⚠️ I show stats, not predictions. I'm not a financial advisor and nothing "
     "I say is investment advice. See /disclaimer for the full notice.\n"
+    "\n"
+    "Fair-use limit: 10 questions per 3-hour window.\n"
     "\n"
     "Type /help for the command list."
 )
@@ -123,6 +126,7 @@ async def _amain() -> None:
             anthropic_api_key=settings.anthropic_api_key,
             coingecko=cg,
         )
+        quota = QuotaTracker()
 
         @client.on(events.NewMessage(pattern=r"^/start(?:\s|$|@)"))
         async def start(event: events.NewMessage.Event) -> None:
@@ -183,8 +187,17 @@ async def _amain() -> None:
             if _IDENTITY_RE.search(text):
                 await event.reply(_HELP_TEXT)
                 return
+            allowed, remaining = quota.check_and_consume(event.sender_id)
+            if not allowed:
+                await event.reply(
+                    "You've used all 10 questions for this 3-hour window. "
+                    "Come back later!"
+                )
+                return
             async with client.action(event.chat_id, "typing"):
                 reply_text = await agent.reply(text)
+            if remaining <= 3:
+                reply_text += f"\n\n_({remaining} question{'s' if remaining != 1 else ''} remaining in this 3-hour window)_"
             await event.reply(reply_text)
 
         await client.start(bot_token=settings.telegram_bot_token)
