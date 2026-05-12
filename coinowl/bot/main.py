@@ -140,6 +140,7 @@ async def _amain() -> None:
     async with CoinGeckoClient(api_key=settings.coingecko_api_key) as cg:
         agent = Agent(
             gemini_api_key=settings.gemini_api_key,
+            gemini_model=settings.gemini_model,
             anthropic_api_key=settings.anthropic_api_key,
             coingecko=cg,
         )

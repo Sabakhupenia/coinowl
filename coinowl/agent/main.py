@@ -277,9 +277,10 @@ _GEMINI_TOOLS = genai_types.Tool(
 
 
 class GeminiProvider:
-    def __init__(self, api_key: str, coingecko: CoinGeckoClient) -> None:
+    def __init__(self, api_key: str, coingecko: CoinGeckoClient, model: str = _GEMINI_MODEL) -> None:
         self._client = genai.Client(api_key=api_key)
         self._cg = coingecko
+        self._model = model
 
     async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
         side_effects: dict[str, Any] = {}
@@ -297,7 +298,7 @@ class GeminiProvider:
 
         for _ in range(_MAX_TOOL_ITERATIONS):
             response = await self._client.aio.models.generate_content(
-                model=_GEMINI_MODEL,
+                model=self._model,
                 contents=contents,
                 config=config,
             )
@@ -469,15 +470,17 @@ class Agent:
         self,
         *,
         gemini_api_key: str,
+        gemini_model: str = _GEMINI_MODEL,
         anthropic_api_key: str | None,
         coingecko: CoinGeckoClient,
     ) -> None:
-        self._gemini = GeminiProvider(gemini_api_key, coingecko)
+        self._gemini = GeminiProvider(gemini_api_key, coingecko, model=gemini_model)
         self._claude: ClaudeProvider | None = (
             ClaudeProvider(anthropic_api_key, coingecko)
             if anthropic_api_key
             else None
         )
+        log.info("Gemini model: {}", gemini_model)
         if self._claude is None:
             log.info("ANTHROPIC_API_KEY not set — running Gemini-only (no fallback)")
 
