@@ -36,6 +36,8 @@ python main.py
 
 **First run:** Telethon opens a browser or prompts for a phone number to authenticate. This writes `coinowl_bot.session` (gitignored). Subsequent runs reuse the session silently.
 
+**Runs locally** on the developer's Windows machine. No server, Docker, or cloud deployment.
+
 **No test runner, no linter, no CI configured yet.** To verify a change: `python -c "from coinowl.bot.main import run; print('OK')"`.
 
 ---
@@ -98,7 +100,7 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - `QuotaTracker._log: dict[int, deque[datetime]]` — per user_id rolling window
 - `follow_up_store: dict[int, dict]` in `bot/main.py` — last chart context per user for "yes" expansion
 
-**No database yet.** `coinowl/db/__init__.py` is a placeholder. Postgres + pgvector is planned for v2 (persistent quota, user records, conversation history, coin embeddings for `/similar`).
+**No database yet.** `coinowl/db/__init__.py` is a placeholder. Supabase (hosted Postgres + pgvector) is planned for v2 (persistent quota, user records, conversation history, coin embeddings for `/similar`).
 
 **Secrets:** `.env` only, gitignored. Never in `.env.example`, never in logs (loguru file sink at `logs/coinowl.log`).
 
@@ -169,10 +171,10 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 ## Roadmap
 
-1. **v2 — Postgres + pgvector:** persistent user records, quota, conversation history, coin embeddings for `/similar` (semantic coin comparison). Single commit: schema, migrations, all at once. No SQLite intermediate.
-2. **v3 — Alerts:** user-configured price alerts, background polling.
-3. **/interactive:** re-render last chart as self-contained Plotly HTML file, delivered as Telegram document.
-4. **Test suite:** at minimum unit tests for guardrail regex, `_mini_chart`, `QuotaTracker`, and `resolve()`.
+1. **Test suite + bugfixes (now):** unit tests for guardrail regex, `_mini_chart`, `QuotaTracker`, `resolve()`, and the yes-expansion logic. Fix any bugs found during live testing.
+2. **v2 — Supabase (Postgres + pgvector):** persistent user records, quota, conversation history, coin embeddings for `/similar`. Connect via Supabase Python client or psycopg. No SQLite intermediate.
+3. **v3 — Alerts:** user-configured price alerts, background polling loop.
+4. **/interactive:** re-render last chart as self-contained Plotly HTML file, delivered as Telegram document.
 5. **CI/CD:** GitHub Actions workflow for import smoke tests and lint on push.
 
 ---
@@ -187,5 +189,5 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - **Georgian is first-class.** Any change that might affect multilingual behavior needs explicit verification.
 - **No tests exist.** Don't add test stubs or pytest scaffolding unless the user asks. Do run import smoke tests before committing.
 - **Commit after each logical unit.** Don't batch unrelated changes.
-- **No SQLite.** If persistence comes up, Postgres+pgvector is the target. Don't introduce a SQLite intermediate.
+- **No SQLite.** Persistence target is Supabase (Postgres + pgvector). Don't introduce a SQLite intermediate.
 - **No email/password auth.** `event.sender_id` (Telegram user_id) is identity. Passwords typed in Telegram are visible in chat history and log files.
