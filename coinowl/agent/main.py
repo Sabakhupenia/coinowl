@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
@@ -40,17 +41,22 @@ log = get_logger(__name__)
 _GEMINI_MODEL = "gemini-2.5-flash"
 _CLAUDE_MODEL = "claude-haiku-4-5"
 
-_SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
-
-
-def _sparkline(prices: list[float], buckets: int = 8) -> str:
-    if not prices:
+def _mini_chart(prices: list[float], buckets: int = 8) -> str:
+    """Return colored-square mini-chart: 🟩 = up, 🟥 = down vs previous sample."""
+    if len(prices) < 2:
         return ""
-    lo, hi = min(prices), max(prices)
-    span = hi - lo or 1
     step = max(1, len(prices) // buckets)
     sampled = [prices[i] for i in range(0, len(prices), step)][:buckets]
-    return "".join(_SPARKLINE_BLOCKS[round((p - lo) / span * 7)] for p in sampled)
+    return "".join("🟩" if sampled[i] >= sampled[i - 1] else "🟥" for i in range(1, len(sampled)))
+
+
+@dataclass
+class AgentResult:
+    text: str
+    chart_png: bytes | None = field(default=None)
+    chart_context: dict | None = field(default=None)  # {"symbol": str, "days": int}
+
+
 _MAX_TOOL_ITERATIONS = 5
 _MAX_OUTPUT_TOKENS = 2048
 
@@ -76,12 +82,16 @@ def passes_guardrail(text: str) -> bool:
 
 
 async def execute_tool(
-    tool_name: str, args: dict[str, Any], cg: CoinGeckoClient
+    tool_name: str,
+    args: dict[str, Any],
+    cg: CoinGeckoClient,
+    side_effects: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one tool call and return a JSON-serializable result dict.
 
     Returning errors as dict payloads (rather than raising) lets the LLM
     surface a natural apology to the user instead of dropping the whole turn.
+    Non-text side effects (chart context) are written into `side_effects` if provided.
     """
     if tool_name == "get_price":
         symbol = str(args.get("symbol", "")).strip()
@@ -131,6 +141,8 @@ async def execute_tool(
 
         first, last = points[0], points[-1]
         change_pct = (last.price - first.price) / first.price * 100 if first.price else 0.0
+        if side_effects is not None:
+            side_effects["chart_context"] = {"symbol": symbol.upper(), "days": days}
         return {
             "symbol": symbol.upper(),
             "coin_id": coin_id,
@@ -141,7 +153,7 @@ async def execute_tool(
             "last_price_usd": last.price,
             "change_pct": round(change_pct, 2),
             "point_count": len(points),
-            "sparkline": _sparkline([p.price for p in points]),
+            "mini_chart": _mini_chart([p.price for p in points]),
             "attribution": ATTRIBUTION,
         }
 
@@ -199,7 +211,8 @@ class GeminiProvider:
         self._client = genai.Client(api_key=api_key)
         self._cg = coingecko
 
-    async def chat(self, user_text: str) -> str:
+    async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
+        side_effects: dict[str, Any] = {}
         contents: list[Any] = [
             genai_types.Content(
                 role="user",
@@ -221,18 +234,18 @@ class GeminiProvider:
 
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None or candidate.content is None:
-                return ""
+                return "", side_effects
 
             contents.append(candidate.content)
 
             fcs = response.function_calls or []
             if not fcs:
-                return (response.text or "").strip()
+                return (response.text or "").strip(), side_effects
 
             tool_response_parts: list[Any] = []
             for fc in fcs:
                 args = dict(fc.args) if fc.args else {}
-                result = await execute_tool(fc.name, args, self._cg)
+                result = await execute_tool(fc.name, args, self._cg, side_effects)
                 tool_response_parts.append(
                     genai_types.Part.from_function_response(
                         name=fc.name,
@@ -244,7 +257,7 @@ class GeminiProvider:
             )
 
         log.warning("Gemini hit max tool iterations")
-        return "I got stuck thinking about that. Could you rephrase your question?"
+        return "I got stuck thinking about that. Could you rephrase your question?", side_effects
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +309,8 @@ class ClaudeProvider:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._cg = coingecko
 
-    async def chat(self, user_text: str) -> str:
+    async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
+        side_effects: dict[str, Any] = {}
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_text}
         ]
@@ -321,24 +335,26 @@ class ClaudeProvider:
             )
 
             if response.stop_reason == "end_turn":
-                return next(
+                text = next(
                     (b.text for b in response.content if b.type == "text"),
                     "",
                 ).strip()
+                return text, side_effects
 
             if response.stop_reason != "tool_use":
                 log.warning("Claude returned unexpected stop_reason: {}", response.stop_reason)
-                return next(
+                text = next(
                     (b.text for b in response.content if b.type == "text"),
                     "",
                 ).strip()
+                return text, side_effects
 
             messages.append({"role": "assistant", "content": response.content})
 
             tool_results: list[dict[str, Any]] = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = await execute_tool(block.name, dict(block.input), self._cg)
+                    result = await execute_tool(block.name, dict(block.input), self._cg, side_effects)
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -349,7 +365,7 @@ class ClaudeProvider:
             messages.append({"role": "user", "content": tool_results})
 
         log.warning("Claude hit max tool iterations")
-        return "I got stuck thinking about that. Could you rephrase your question?"
+        return "I got stuck thinking about that. Could you rephrase your question?", side_effects
 
 
 # ---------------------------------------------------------------------------
@@ -374,25 +390,30 @@ class Agent:
         if self._claude is None:
             log.info("ANTHROPIC_API_KEY not set — running Gemini-only (no fallback)")
 
-    async def reply(self, user_text: str) -> str:
+    async def reply(self, user_text: str) -> AgentResult:
+        side_effects: dict[str, Any] = {}
         try:
-            text = await self._gemini.chat(user_text)
+            text, side_effects = await self._gemini.chat(user_text)
         except Exception as exc:  # noqa: BLE001 — broad catch is the fallback contract
             log.warning("Gemini failed: {}", exc)
             if self._claude is None:
-                return PROVIDER_FAILED
+                return AgentResult(text=PROVIDER_FAILED)
             log.info("Falling back to Claude")
             try:
-                text = await self._claude.chat(user_text)
+                text, side_effects = await self._claude.chat(user_text)
             except Exception as exc2:  # noqa: BLE001
                 log.error("Both LLMs failed: gemini={} claude={}", exc, exc2)
-                return PROVIDER_FAILED
+                return AgentResult(text=PROVIDER_FAILED)
 
         if not text:
-            return "🦉 (I had no reply for that — try rephrasing?)"
+            return AgentResult(text="🦉 (I had no reply for that — try rephrasing?)")
 
         if not passes_guardrail(text):
             log.warning("Guardrail tripped on model output: {!r}", text[:200])
-            return GUARDRAIL_REFUSAL
+            return AgentResult(text=GUARDRAIL_REFUSAL)
 
-        return text
+        return AgentResult(
+            text=text,
+            chart_png=side_effects.get("chart_png"),
+            chart_context=side_effects.get("chart_context"),
+        )

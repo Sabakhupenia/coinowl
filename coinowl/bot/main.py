@@ -16,7 +16,7 @@ import re
 from telethon import TelegramClient, events
 
 from coinowl import __version__
-from coinowl.agent import Agent
+from coinowl.agent import Agent, AgentResult
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
 from coinowl.core.quota import QuotaTracker
@@ -110,6 +110,23 @@ _IDENTITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_YES_RE = re.compile(
+    r"^\s*(yes|sure|ok|okay|yep|yeah|please|go ahead|კი|да|ок)\s*[!.,?]*\s*$",
+    re.IGNORECASE,
+)
+
+_FOLLOW_UP_PERIODS = {
+    1: "in the last 24 hours",
+    7: "this week",
+    30: "this month",
+    90: "in the last 3 months",
+}
+
+
+def _expand_follow_up(ctx: dict) -> str:
+    period = _FOLLOW_UP_PERIODS.get(ctx["days"], f"over the last {ctx['days']} days")
+    return f"how did {ctx['symbol']} do {period}?"
+
 
 def _is_not_command(event: events.NewMessage.Event) -> bool:
     # Slash-commands have dedicated handlers; everything else goes to the LLM.
@@ -127,6 +144,7 @@ async def _amain() -> None:
             coingecko=cg,
         )
         quota = QuotaTracker()
+        follow_up_store: dict[int, dict] = {}
 
         @client.on(events.NewMessage(pattern=r"^/start(?:\s|$|@)"))
         async def start(event: events.NewMessage.Event) -> None:
@@ -194,8 +212,19 @@ async def _amain() -> None:
                     "Come back later!"
                 )
                 return
+            # Expand short affirmations ("yes", "კი", "да") to the last follow-up query
+            uid = event.sender_id
+            if _YES_RE.match(text) and uid in follow_up_store:
+                text = _expand_follow_up(follow_up_store.pop(uid))
+                log.info("expanded follow-up for {}: {!r}", uid, text)
             async with client.action(event.chat_id, "typing"):
-                reply_text = await agent.reply(text)
+                result: AgentResult = await agent.reply(text)
+            # Update follow-up context for the next "yes"
+            if result.chart_context:
+                follow_up_store[uid] = result.chart_context
+            else:
+                follow_up_store.pop(uid, None)
+            reply_text = result.text
             if remaining <= 3:
                 reply_text += f"\n\n_({remaining} question{'s' if remaining != 1 else ''} remaining in this 3-hour window)_"
             await event.reply(reply_text)

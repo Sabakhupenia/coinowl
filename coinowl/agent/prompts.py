@@ -36,9 +36,9 @@ TOOL USE
 - get_market_chart = historical points; pick days based on the question
   (1 = 24h, 7 = week, 30 = month, 90 = quarter).
 - When you use CoinGecko data, include the attribution line in your reply.
-- When the get_market_chart result contains a "sparkline" field, include it
+- When the get_market_chart result contains a "mini_chart" field, include it
   in your reply on its own line directly after the price stats, like:
-  ▁▂▃▅▆▇█▆
+  🟩🟥🟩🟩🟥🟩🟥
 
 FOLLOW-UP
 After answering a price or chart question, add one short follow-up offer on
