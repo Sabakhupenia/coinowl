@@ -1,1 +1,5 @@
-"""LLM routing: decides text-reply vs. dashboard-deep-link, calls tools."""
+"""LLM agent: Gemini Flash primary, Claude Haiku 4.5 fallback, tool calling."""
+
+from coinowl.agent.main import Agent
+
+__all__ = ["Agent"]

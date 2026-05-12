@@ -53,14 +53,15 @@ No web dashboard, no Telegram Login Widget — every interaction lives inside th
 
 ## Commands
 
-> Currently the bot is in **v0 echo mode** — any message gets echoed back. The surface below lands incrementally as v1 work progresses.
+The bot's primary surface is natural language — ask it anything about crypto in English, Georgian, Russian, or any other language and it will route to the right tool and reply.
 
 - `/start` — greet and explain what the bot does
 - `/help` — list available commands and the current bot version
 - `/version` — print the bot version
+- `/price <symbol>` — quick spot-price command (e.g. `/price BTC`) — bypasses the LLM
 - `/disclaimer` — read the full "not financial advice" notice
-- `/interactive` — re-render the most recent chart as an interactive HTML file (slower but pannable/zoomable)
-- *(any non-command message)* — routed to the LLM for a text reply or chart
+- `/interactive` *(coming next)* — re-render the most recent chart as an interactive HTML file
+- *(any non-command message)* — routed to the LLM agent (Gemini Flash primary, Claude Haiku 4.5 fallback)
 
 ## Setup
 
@@ -80,6 +81,9 @@ Where to get the secrets:
 
 - **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** — log into <https://my.telegram.org>, create an application, copy the values. Telethon needs these even when running as a bot (a difference from `python-telegram-bot`).
 - **`TELEGRAM_BOT_TOKEN`** — message [@BotFather](https://t.me/BotFather), `/newbot`, follow the prompts. The token he hands back goes here.
+- **`GEMINI_API_KEY`** — get from <https://aistudio.google.com/apikey>. This is the primary LLM that powers natural-language chat.
+- **`ANTHROPIC_API_KEY`** — get from <https://console.anthropic.com/settings/keys>. Used as the fallback when Gemini errors.
+- **`COINGECKO_API_KEY`** (optional) — see [Data attribution](#data-attribution) below.
 
 Then:
 

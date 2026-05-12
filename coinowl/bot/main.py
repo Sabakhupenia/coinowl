@@ -1,10 +1,10 @@
 """CoinOwl Telegram bot.
 
-v0.2.0 surface:
+v0.3.0 surface:
   /start, /help, /version, /disclaimer — informational
   /price <symbol>                       — current spot price via CoinGecko
-  (any other text)                      — echoed back; placeholder for the LLM
-                                          router that lands later in v1
+  (any other text)                      — routed to the LLM agent
+                                          (Gemini Flash → Claude Haiku 4.5 fallback)
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import asyncio
 from telethon import TelegramClient, events
 
 from coinowl import __version__
+from coinowl.agent import Agent
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
 from coinowl.data.coingecko import (
@@ -32,19 +33,23 @@ log = get_logger(__name__)
 _START_TEXT = (
     "🦉 Hi! I'm CoinOwl — a crypto analytics bot.\n"
     "\n"
-    "⚠️ I show stats and charts, not predictions. I'm not a financial advisor "
-    "and nothing I say is investment advice. See /disclaimer for the full notice.\n"
+    "Just ask me anything about crypto in plain English (or Georgian, or Russian) — "
+    "I'll fetch the real numbers and reply. Examples:\n"
+    "  • what's BTC at?\n"
+    "  • how did ETH do this week?\n"
+    "  • compare SOL and BNB over the last month\n"
     "\n"
-    "Right now I'm in early-access mode. Soon I'll answer crypto questions "
-    "inline or send you charts directly in chat.\n"
+    "⚠️ I show stats, not predictions. I'm not a financial advisor and nothing "
+    "I say is investment advice. See /disclaimer for the full notice.\n"
     "\n"
-    "Type /help to see what I can do today."
+    "Type /help for the command list."
 )
 
 _HELP_TEXT = (
     f"🦉 CoinOwl v{__version__}\n"
     "\n"
-    "Early-access mode — chart features land soon.\n"
+    "Just ask me anything about crypto — I understand plain English, Georgian, "
+    "Russian, and other languages. I'll call live data and reply.\n"
     "\n"
     "⚠️ Stats only, not financial advice. See /disclaimer.\n"
     "\n"
@@ -52,10 +57,8 @@ _HELP_TEXT = (
     "  /start — greet\n"
     "  /help — show this message\n"
     "  /version — show bot version\n"
-    "  /price <symbol> — current spot price (e.g. /price BTC)\n"
-    "  /disclaimer — read the full 'not financial advice' notice\n"
-    "\n"
-    "Send any other message and I'll echo it back for now."
+    "  /price <symbol> — quick spot price (e.g. /price BTC)\n"
+    "  /disclaimer — read the full 'not financial advice' notice"
 )
 
 _VERSION_TEXT = f"🦉 CoinOwl v{__version__}"
@@ -83,7 +86,9 @@ _PRICE_USAGE_TEXT = (
     "Example: /price BTC\n"
     "\n"
     "Known tickers: " + ", ".join(SYMBOLS.keys()) + "\n"
-    "(or pass any CoinGecko coin ID directly, e.g. 'the-open-network')"
+    "(or pass any CoinGecko coin ID directly, e.g. 'the-open-network')\n"
+    "\n"
+    "Tip: you can also just ask me in plain English — \"what's BTC at?\""
 )
 
 
@@ -96,8 +101,7 @@ def _build_client(settings: Settings) -> TelegramClient:
 
 
 def _is_not_command(event: events.NewMessage.Event) -> bool:
-    # Lets the echo handler ignore /start, /help, /version, /disclaimer, /price,
-    # and any unknown slash-commands so it doesn't double-reply.
+    # Slash-commands have dedicated handlers; everything else goes to the LLM.
     return not (event.raw_text or "").startswith("/")
 
 
@@ -106,6 +110,11 @@ async def _amain() -> None:
     client = _build_client(settings)
 
     async with CoinGeckoClient(api_key=settings.coingecko_api_key) as cg:
+        agent = Agent(
+            gemini_api_key=settings.gemini_api_key,
+            anthropic_api_key=settings.anthropic_api_key,
+            coingecko=cg,
+        )
 
         @client.on(events.NewMessage(pattern=r"^/start(?:\s|$|@)"))
         async def start(event: events.NewMessage.Event) -> None:
@@ -158,10 +167,14 @@ async def _amain() -> None:
             )
 
         @client.on(events.NewMessage(func=_is_not_command))
-        async def echo(event: events.NewMessage.Event) -> None:
-            text = event.raw_text or ""
-            log.info("echo from %s: %r", event.sender_id, text)
-            await event.reply(f"🦉 echo: {text}")
+        async def chat(event: events.NewMessage.Event) -> None:
+            text = (event.raw_text or "").strip()
+            if not text:
+                return  # ignore stickers / empty / media-only messages
+            log.info("chat from %s: %r", event.sender_id, text)
+            async with client.action(event.chat_id, "typing"):
+                reply_text = await agent.reply(text)
+            await event.reply(reply_text)
 
         await client.start(bot_token=settings.telegram_bot_token)
         log.info("CoinOwl bot is up. Send it a message on Telegram.")
