@@ -2,7 +2,7 @@
 
 CoinOwl is a Telegram bot for cryptocurrency analytics. Users chat in plain text (English, Georgian, Russian) and the bot replies with live prices, historical stats, and price chart images fetched from CoinGecko. It is explicitly a *statistics tool* — it never predicts prices or gives financial advice, enforced by both a system prompt and a regex guardrail. Single developer, pre-alpha, proprietary.
 
-**Stack:** Python 3.12 · Telethon (Telegram MTProto client) · google-genai (Gemini 2.5 Flash, primary LLM) · anthropic (Claude Haiku 4.5, optional fallback) · httpx + CoinGecko REST API · Plotly + kaleido (PNG chart rendering) · loguru (structured logging) · python-dotenv
+**Stack:** Python 3.12 · Telethon (Telegram MTProto client) · openai (gpt-5.4-mini, primary LLM for non-chart messages) · google-genai (Gemini 2.5 Flash, primary for chart messages) · anthropic (Claude Haiku 4.5, last-resort fallback) · httpx + CoinGecko REST API · Plotly + kaleido (PNG/HTML chart rendering) · loguru (structured logging) · python-dotenv
 
 ---
 
@@ -31,7 +31,9 @@ python main.py
 
 | Var | Effect if absent |
 |-----|-----------------|
-| `ANTHROPIC_API_KEY` | Gemini-only mode, no LLM fallback |
+| `OPENAI_API_KEY` | All queries route to Gemini (no intent split, no quota relief) |
+| `OPENAI_MODEL` | Defaults to `gpt-5.4-mini` (2.5M tokens/day free) |
+| `ANTHROPIC_API_KEY` | No last-resort fallback; if both OpenAI and Gemini fail, user sees an error |
 | `COINGECKO_API_KEY` | Free tier (~5 req/min); demo key gives 30 req/min |
 
 **First run:** Telethon opens a browser or prompts for a phone number to authenticate. This writes `coinowl_bot.session` (gitignored). Subsequent runs reuse the session silently.
@@ -47,12 +49,23 @@ python main.py
 ```
 main.py
   └── coinowl/bot/main.py          Telethon event loop, command handlers, quota
-        └── coinowl/agent/main.py  Agent.reply() → GeminiProvider or ClaudeProvider
-              └── execute_tool()   dispatches get_price / get_market_chart / get_chart
-                    ├── coinowl/data/coingecko.py   async HTTP, TTL cache
-                    ├── coinowl/data/symbols.py      ticker → CoinGecko ID
-                    └── coinowl/charts/plotly_chart.py  PNG via kaleido
+        └── coinowl/agent/main.py  Agent.reply() → intent-routed provider chain:
+                                     chart keywords → Gemini → OpenAI → Claude
+                                     otherwise      → OpenAI → Gemini → Claude
+              └── execute_tool()   dispatches get_price / get_market_chart /
+                                   get_chart / get_chart_html
+                    ├── coinowl/data/coingecko.py        async HTTP, TTL cache
+                    ├── coinowl/data/symbols.py          ticker → CoinGecko ID
+                    └── coinowl/charts/plotly_chart.py   bar PNG via kaleido,
+                                                         interactive HTML via to_html
 ```
+
+**Intent router:** `wants_chart()` in `agent/main.py` matches `_CHART_INTENT_RE` —
+chart/graph/plot/visualize/html (EN), ჩარტი/გრაფიკი/ნახაზი/ვიზუალ/ინტერაქტიულ (KA),
+график/диаграмм/чарт/визуализ/интерактивн (RU). True → Gemini-first; False → OpenAI-first.
+The chart PNG/HTML is rendered by Plotly + kaleido regardless of which LLM is in front;
+the routing exists only to conserve Gemini's per-day quota for messages that explicitly
+ask for charts (Gemini's tool-calling path is the one we've battle-tested for charts).
 
 **Key files:**
 
@@ -98,7 +111,8 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 **In-memory state (resets on restart):**
 - `QuotaTracker._log: dict[int, deque[datetime]]` — per user_id rolling window
-- `follow_up_store: dict[int, dict]` in `bot/main.py` — last chart context per user for "yes" expansion
+- `follow_up_store: dict[int, dict]` in `bot/main.py` — last chart context per user for "yes" expansion (when a chart tool ran)
+- `last_reply_store: dict[int, str]` in `bot/main.py` — last assistant text per user; used when "yes" arrives but no chart tool was called (multi-turn-lite)
 
 **No database yet.** `coinowl/db/__init__.py` is a placeholder. Supabase (hosted Postgres + pgvector) is planned for v2 (persistent quota, user records, conversation history, coin embeddings for `/similar`).
 
@@ -138,7 +152,11 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **Quota resets on restart.** `QuotaTracker` is in-memory. A bot restart lets users bypass the 3-hour window. Acceptable for now; Postgres persistence is v2.
 
-- **`ANTHROPIC_API_KEY` is optional.** If not set, Claude fallback is disabled silently (logged at INFO). The bot runs Gemini-only.
+- **`ANTHROPIC_API_KEY` is optional.** Disabled silently if unset (logged at INFO). The remaining chain (OpenAI ↔ Gemini) still works.
+
+- **`OPENAI_API_KEY` is optional but recommended.** Without it, every message routes to Gemini and the per-day RPD limit becomes the bottleneck. With it, only chart-keyword messages hit Gemini.
+
+- **OpenAI free-tier model defaults to `gpt-5.4-mini`.** 2.5M tokens/day on the traffic-share tier. Override with `OPENAI_MODEL=gpt-5.4` for higher quality (250K/day budget). The chart-render path is unaffected by model choice — Plotly does the rendering.
 
 - **README is partially stale.** Architecture diagram still shows Groq (dropped). `/interactive` command is listed but not implemented. Roadmap phases in README don't match current commit history exactly.
 
@@ -149,22 +167,24 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 ## Current state
 
 **Working end-to-end:**
-- Natural-language chat in English, Georgian, Russian via Gemini 2.5 Flash
-- Claude Haiku 4.5 fallback (when `ANTHROPIC_API_KEY` set)
+- Natural-language chat in English, Georgian, Russian via OpenAI gpt-5.4-mini (primary for non-chart messages) or Gemini 2.5 Flash (primary for chart messages)
+- Silent fallback chain: if the primary LLM throws, the other one picks up the same message without user-visible notice (logged at warning level)
+- Claude Haiku 4.5 as last-resort fallback (when `ANTHROPIC_API_KEY` set)
 - `/price`, `/start`, `/help`, `/version`, `/disclaimer` commands
 - `get_price` and `get_market_chart` LLM tools
-- `get_chart` tool → Plotly PNG sent inline as Telegram photo
+- `get_chart` tool → Plotly **bar** chart PNG sent inline as Telegram photo (named `SYM_Nd.png`)
+- `get_chart_html` tool → interactive Plotly HTML sent as Telegram document; offered after every PNG chart, only generated when user confirms
 - Colored-square mini-chart (🟩🟥) in text stats replies
-- Follow-up "yes"/"კი"/"да" expansion to last chart context
+- Follow-up "yes"/"კი"/"да" expansion: chart context if a chart tool ran, else last-reply preamble passed back to the LLM (multi-turn-lite)
 - In-memory quota: 10 messages / 3-hour window
 - Identity prefilter ("who are you" → /help, no API call)
 - loguru structured logging to stderr + `logs/coinowl.log` in Tbilisi time
 
 **Placeholder / not started:**
 - `coinowl/db/` — empty, waiting for Postgres+pgvector commit
-- `/interactive` command (HTML chart export) — in README, not coded
-- Multi-turn conversation memory — each message is stateless
+- Persistent multi-turn conversation memory beyond the last-reply hack
 - Quota persistence across restarts
+- Server-side cache of generated charts (re-renders identical bar/HTML on every call today)
 - Any tests or CI
 
 ---
@@ -172,10 +192,9 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 ## Roadmap
 
 1. **Test suite + bugfixes (now):** unit tests for guardrail regex, `_mini_chart`, `QuotaTracker`, `resolve()`, and the yes-expansion logic. Fix any bugs found during live testing.
-2. **v2 — Supabase (Postgres + pgvector):** persistent user records, quota, conversation history, coin embeddings for `/similar`. Connect via Supabase Python client or psycopg. No SQLite intermediate.
+2. **v2 — Supabase (Postgres + pgvector):** persistent user records, quota, conversation history, coin embeddings for `/similar`, **cache of rendered charts (PNG + HTML) keyed by `chart_context` so identical requests don't hit kaleido/CoinGecko twice**. Connect via Supabase Python client or psycopg. No SQLite intermediate.
 3. **v3 — Alerts:** user-configured price alerts, background polling loop.
-4. **/interactive:** re-render last chart as self-contained Plotly HTML file, delivered as Telegram document.
-5. **CI/CD:** GitHub Actions workflow for import smoke tests and lint on push.
+4. **CI/CD:** GitHub Actions workflow for import smoke tests and lint on push.
 
 ---
 

@@ -21,7 +21,9 @@ class Settings:
     telegram_bot_token: str
     gemini_api_key: str
     gemini_model: str              # default: gemini-2.5-flash
-    anthropic_api_key: str | None  # fallback LLM; unset = Gemini-only
+    openai_api_key: str | None     # primary LLM for non-chart queries; unset = Gemini-only
+    openai_model: str              # default: gpt-5.4-mini
+    anthropic_api_key: str | None  # last-resort fallback LLM
     coingecko_api_key: str | None  # demo plan key, optional
 
 
@@ -55,6 +57,8 @@ def load_settings() -> Settings:
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         gemini_api_key=_require("GEMINI_API_KEY"),
         gemini_model=os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash",
+        openai_api_key=_optional("OPENAI_API_KEY"),
+        openai_model=os.environ.get("OPENAI_MODEL", "").strip() or "gpt-5.4-mini",
         anthropic_api_key=_optional("ANTHROPIC_API_KEY"),
         coingecko_api_key=_optional("COINGECKO_API_KEY"),
     )

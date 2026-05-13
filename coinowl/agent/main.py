@@ -1,9 +1,13 @@
-"""CoinOwl LLM agent — Gemini Flash primary, Claude Haiku 4.5 fallback.
+"""CoinOwl LLM agent — OpenAI primary for general questions, Gemini for chart
+requests, Claude Haiku as last-resort fallback.
 
-Both providers see the same tool surface (`get_price`, `get_market_chart`)
-and the same system prompt (see `prompts.SYSTEM_PROMPT`). Each provider runs
-its own tool-calling loop; the Agent class orchestrates the fallback chain
-and runs an output guardrail before returning.
+All providers see the same four tools (`get_price`, `get_market_chart`,
+`get_chart`, `get_chart_html`) and the same system prompt. Per-message routing
+is intent-driven: messages mentioning chart/graph/plot keywords (in EN/KA/RU)
+go to Gemini first because the chart pipeline was built and tested there; all
+other messages go to OpenAI to conserve Gemini's RPD quota. If the primary
+fails, the other LLM picks up the slack silently (logged, not user-visible);
+Claude is the final safety net.
 
 The tool dispatcher (`execute_tool`) returns dicts rather than raising so the
 model can apologize naturally on errors ("I don't recognize 'FOO'") instead
@@ -18,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
+import openai
 from google import genai
 from google.genai import types as genai_types
 
@@ -34,13 +39,30 @@ from coinowl.data.coingecko import (
     CoinGeckoRateLimitError,
     CoinGeckoUnknownCoinError,
 )
-from coinowl.charts.plotly_chart import generate_price_chart
+from coinowl.charts.plotly_chart import generate_chart, generate_chart_html
 from coinowl.data.symbols import resolve
 
 log = get_logger(__name__)
 
 _GEMINI_MODEL = "gemini-2.5-flash"
+_OPENAI_MODEL = "gpt-5.4-mini"
 _CLAUDE_MODEL = "claude-haiku-4-5"
+
+# Route messages mentioning these tokens to Gemini first; everything else to
+# OpenAI. The actual chart PNG/HTML is rendered by Plotly regardless of LLM —
+# this split is just to conserve Gemini's per-day quota for messages where the
+# user is explicitly asking for a chart.
+_CHART_INTENT_RE = re.compile(
+    r"\b(chart|graph|plot|visuali[sz]e|html|interactive)\b"
+    r"|ჩარტი|გრაფიკი|ნახაზი|ვიზუალ|ინტერაქტიულ"
+    r"|график|диаграмм|чарт|визуализ|интерактивн",
+    re.IGNORECASE,
+)
+
+
+def wants_chart(text: str) -> bool:
+    return bool(_CHART_INTENT_RE.search(text))
+
 
 def _mini_chart(prices: list[float], buckets: int = 8) -> str:
     """Return colored-square mini-chart: 🟩 = up, 🟥 = down vs previous sample."""
@@ -55,6 +77,9 @@ def _mini_chart(prices: list[float], buckets: int = 8) -> str:
 class AgentResult:
     text: str
     chart_png: bytes | None = field(default=None)
+    chart_filename: str | None = field(default=None)
+    chart_html: bytes | None = field(default=None)
+    chart_html_filename: str | None = field(default=None)
     chart_context: dict | None = field(default=None)  # {"symbol": str, "days": int}
 
 
@@ -187,13 +212,14 @@ async def execute_tool(
         change_pct = (last.price - first.price) / first.price * 100 if first.price else 0.0
 
         try:
-            png_bytes = await generate_price_chart(symbol.upper(), points, days)
+            png_bytes = await generate_chart(symbol.upper(), points, days)
         except Exception as exc:
             log.warning("Chart render failed for {}: {}", symbol, exc)
             return {"error": "Chart generation failed; try again"}
 
         if side_effects is not None:
             side_effects["chart_png"] = png_bytes
+            side_effects["chart_filename"] = f"{symbol.upper()}_{days}d.png"
             side_effects["chart_context"] = {"symbol": symbol.upper(), "days": days}
 
         return {
@@ -203,6 +229,49 @@ async def execute_tool(
             "first_price_usd": first.price,
             "last_price_usd": last.price,
             "change_pct": round(change_pct, 2),
+            "attribution": ATTRIBUTION,
+        }
+
+    if tool_name == "get_chart_html":
+        symbol = str(args.get("symbol", "")).strip()
+        try:
+            days = int(args.get("days", 7))
+        except (TypeError, ValueError):
+            return {"error": "Argument 'days' must be an integer"}
+        if not symbol:
+            return {"error": "Missing required argument: symbol"}
+        if days not in (1, 7, 30, 90):
+            days = max(1, min(90, days))
+
+        coin_id = resolve(symbol)
+        try:
+            points = await cg.get_market_chart(coin_id, days=days)
+        except CoinGeckoUnknownCoinError:
+            return {"error": f"Unknown coin: {symbol!r}", "symbol": symbol}
+        except CoinGeckoRateLimitError:
+            return {"error": "CoinGecko is rate-limiting; back off and try later"}
+        except CoinGeckoError as exc:
+            log.warning("get_chart_html failed for {}: {}", coin_id, exc)
+            return {"error": "CoinGecko request failed; try again"}
+
+        if not points:
+            return {"error": "No data returned", "symbol": symbol}
+
+        try:
+            html_bytes = await generate_chart_html(symbol.upper(), points, days)
+        except Exception as exc:
+            log.warning("HTML chart render failed for {}: {}", symbol, exc)
+            return {"error": "HTML chart generation failed; try again"}
+
+        if side_effects is not None:
+            side_effects["chart_html"] = html_bytes
+            side_effects["chart_html_filename"] = f"{symbol.upper()}_{days}d.html"
+            side_effects["chart_context"] = {"symbol": symbol.upper(), "days": days}
+
+        return {
+            "html": "ready",
+            "symbol": symbol.upper(),
+            "days": days,
             "attribution": ATTRIBUTION,
         }
 
@@ -254,8 +323,30 @@ _GEMINI_TOOLS = genai_types.Tool(
         genai_types.FunctionDeclaration(
             name="get_chart",
             description=(
-                "Generate and send a PNG price chart image. "
+                "Generate and send a PNG bar chart of historical prices. "
                 "Call this when the user explicitly asks for a chart, graph, or plot."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "symbol": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Ticker or CoinGecko coin id.",
+                    ),
+                    "days": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="Lookback window: 1, 7, 30, or 90.",
+                    ),
+                },
+                required=["symbol", "days"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_chart_html",
+            description=(
+                "Send the interactive HTML version of a chart. Call this ONLY after "
+                "the user has confirmed (e.g. 'yes') a prior HTML offer. Use the same "
+                "symbol and days as the most recent get_chart call."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -375,8 +466,30 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_chart",
         "description": (
-            "Generate and send a PNG price chart image. "
+            "Generate and send a PNG bar chart of historical prices. "
             "Call this when the user explicitly asks for a chart, graph, or plot."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Ticker or CoinGecko coin id.",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "Lookback window: 1, 7, 30, or 90.",
+                },
+            },
+            "required": ["symbol", "days"],
+        },
+    },
+    {
+        "name": "get_chart_html",
+        "description": (
+            "Send the interactive HTML version of a chart. Call this ONLY after "
+            "the user has confirmed (e.g. 'yes') a prior HTML offer. Use the same "
+            "symbol and days as the most recent get_chart call."
         ),
         "input_schema": {
             "type": "object",
@@ -461,7 +574,132 @@ class ClaudeProvider:
 
 
 # ---------------------------------------------------------------------------
-# Agent — fallback chain + guardrail.
+# OpenAI provider — manual tool-calling loop on AsyncOpenAI.
+# ---------------------------------------------------------------------------
+
+
+def _openai_tool(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+_OPENAI_TOOLS: list[dict[str, Any]] = [
+    _openai_tool(
+        "get_price",
+        "Get the current spot price of a cryptocurrency in USD.",
+        {
+            "symbol": {
+                "type": "string",
+                "description": "Ticker (BTC, ETH) or CoinGecko coin id (bitcoin).",
+            }
+        },
+        ["symbol"],
+    ),
+    _openai_tool(
+        "get_market_chart",
+        "Get historical price points for a cryptocurrency over the last N days. "
+        "Returns first/last prices and percent change.",
+        {
+            "symbol": {"type": "string", "description": "Ticker or CoinGecko coin id."},
+            "days": {"type": "integer", "description": "Lookback window: 1, 7, 30, or 90."},
+        },
+        ["symbol", "days"],
+    ),
+    _openai_tool(
+        "get_chart",
+        "Generate and send a PNG bar chart of historical prices. "
+        "Call this when the user explicitly asks for a chart, graph, or plot.",
+        {
+            "symbol": {"type": "string", "description": "Ticker or CoinGecko coin id."},
+            "days": {"type": "integer", "description": "Lookback window: 1, 7, 30, or 90."},
+        },
+        ["symbol", "days"],
+    ),
+    _openai_tool(
+        "get_chart_html",
+        "Send the interactive HTML version of a chart. Call this ONLY after "
+        "the user has confirmed (e.g. 'yes') a prior HTML offer. Use the same "
+        "symbol and days as the most recent get_chart call.",
+        {
+            "symbol": {"type": "string", "description": "Ticker or CoinGecko coin id."},
+            "days": {"type": "integer", "description": "Lookback window: 1, 7, 30, or 90."},
+        },
+        ["symbol", "days"],
+    ),
+]
+
+
+class OpenAIProvider:
+    def __init__(self, api_key: str, coingecko: CoinGeckoClient, model: str = _OPENAI_MODEL) -> None:
+        self._client = openai.AsyncOpenAI(api_key=api_key)
+        self._cg = coingecko
+        self._model = model
+
+    async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
+        side_effects: dict[str, Any] = {}
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ]
+
+        for _ in range(_MAX_TOOL_ITERATIONS):
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                tools=_OPENAI_TOOLS,
+                max_completion_tokens=_MAX_OUTPUT_TOKENS,
+            )
+            msg = response.choices[0].message
+            tool_calls = msg.tool_calls or []
+
+            if not tool_calls:
+                return (msg.content or "").strip(), side_effects
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        }
+                        for tc in tool_calls
+                    ],
+                }
+            )
+
+            for tc in tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = await execute_tool(tc.function.name, args, self._cg, side_effects)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(result),
+                    }
+                )
+
+        log.warning("OpenAI hit max tool iterations")
+        return "I got stuck thinking about that. Could you rephrase your question?", side_effects
+
+
+# ---------------------------------------------------------------------------
+# Agent — intent-routed provider chain + guardrail.
 # ---------------------------------------------------------------------------
 
 
@@ -471,33 +709,64 @@ class Agent:
         *,
         gemini_api_key: str,
         gemini_model: str = _GEMINI_MODEL,
+        openai_api_key: str | None,
+        openai_model: str = _OPENAI_MODEL,
         anthropic_api_key: str | None,
         coingecko: CoinGeckoClient,
     ) -> None:
         self._gemini = GeminiProvider(gemini_api_key, coingecko, model=gemini_model)
+        self._openai: OpenAIProvider | None = (
+            OpenAIProvider(openai_api_key, coingecko, model=openai_model)
+            if openai_api_key
+            else None
+        )
         self._claude: ClaudeProvider | None = (
             ClaudeProvider(anthropic_api_key, coingecko)
             if anthropic_api_key
             else None
         )
         log.info("Gemini model: {}", gemini_model)
+        if self._openai is not None:
+            log.info("OpenAI model: {} (primary for non-chart queries)", openai_model)
+        else:
+            log.info("OPENAI_API_KEY not set — routing all queries to Gemini")
         if self._claude is None:
-            log.info("ANTHROPIC_API_KEY not set — running Gemini-only (no fallback)")
+            log.info("ANTHROPIC_API_KEY not set — Claude fallback disabled")
+
+    def _provider_chain(self, user_text: str) -> list[tuple[str, Any]]:
+        """Ordered list of (label, provider) to try for this message."""
+        chain: list[tuple[str, Any]] = []
+        chart_intent = wants_chart(user_text)
+        # Primary: Gemini for chart messages, OpenAI otherwise. Fall through
+        # the other live provider, then Claude.
+        if chart_intent or self._openai is None:
+            chain.append(("gemini", self._gemini))
+            if self._openai is not None:
+                chain.append(("openai", self._openai))
+        else:
+            chain.append(("openai", self._openai))
+            chain.append(("gemini", self._gemini))
+        if self._claude is not None:
+            chain.append(("claude", self._claude))
+        return chain
 
     async def reply(self, user_text: str) -> AgentResult:
         side_effects: dict[str, Any] = {}
-        try:
-            text, side_effects = await self._gemini.chat(user_text)
-        except Exception as exc:  # noqa: BLE001 — broad catch is the fallback contract
-            log.warning("Gemini failed: {}", exc)
-            if self._claude is None:
-                return AgentResult(text=PROVIDER_FAILED)
-            log.info("Falling back to Claude")
+        chain = self._provider_chain(user_text)
+        text: str = ""
+        errors: list[str] = []
+        for label, provider in chain:
             try:
-                text, side_effects = await self._claude.chat(user_text)
-            except Exception as exc2:  # noqa: BLE001
-                log.error("Both LLMs failed: gemini={} claude={}", exc, exc2)
-                return AgentResult(text=PROVIDER_FAILED)
+                text, side_effects = await provider.chat(user_text)
+                if errors:
+                    log.info("{} succeeded after {} failed", label, ", ".join(errors))
+                break
+            except Exception as exc:  # noqa: BLE001 — broad catch is the fallback contract
+                log.warning("{} failed: {}", label, exc)
+                errors.append(f"{label}={exc.__class__.__name__}")
+        else:
+            log.error("All LLMs failed: {}", "; ".join(errors))
+            return AgentResult(text=PROVIDER_FAILED)
 
         if not text:
             return AgentResult(text="🦉 (I had no reply for that — try rephrasing?)")
@@ -509,5 +778,8 @@ class Agent:
         return AgentResult(
             text=text,
             chart_png=side_effects.get("chart_png"),
+            chart_filename=side_effects.get("chart_filename"),
+            chart_html=side_effects.get("chart_html"),
+            chart_html_filename=side_effects.get("chart_html_filename"),
             chart_context=side_effects.get("chart_context"),
         )

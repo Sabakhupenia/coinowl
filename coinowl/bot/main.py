@@ -141,11 +141,14 @@ async def _amain() -> None:
         agent = Agent(
             gemini_api_key=settings.gemini_api_key,
             gemini_model=settings.gemini_model,
+            openai_api_key=settings.openai_api_key,
+            openai_model=settings.openai_model,
             anthropic_api_key=settings.anthropic_api_key,
             coingecko=cg,
         )
         quota = QuotaTracker()
         follow_up_store: dict[int, dict] = {}
+        last_reply_store: dict[int, str] = {}
 
         @client.on(events.NewMessage(pattern=r"^/start(?:\s|$|@)"))
         async def start(event: events.NewMessage.Event) -> None:
@@ -213,11 +216,24 @@ async def _amain() -> None:
                     "Come back later!"
                 )
                 return
-            # Expand short affirmations ("yes", "კი", "да") to the last follow-up query
+            # Expand short affirmations ("yes", "კი", "да") to the last follow-up query.
+            # If no chart context is stored but we have the LLM's previous reply, hand
+            # that reply back as context so the model can fulfill its own text offer
+            # (e.g. "Want the 30-day chart?" or "Want the HTML version?") that didn't
+            # come from a tool call.
             uid = event.sender_id
-            if _YES_RE.match(text) and uid in follow_up_store:
-                text = _expand_follow_up(follow_up_store.pop(uid))
-                log.info("expanded follow-up for {}: {!r}", uid, text)
+            if _YES_RE.match(text):
+                if uid in follow_up_store:
+                    text = _expand_follow_up(follow_up_store.pop(uid))
+                    log.info("expanded follow-up for {}: {!r}", uid, text)
+                elif uid in last_reply_store:
+                    text = (
+                        f"Earlier you replied: \"{last_reply_store[uid]}\"\n"
+                        "The user has now answered: \"yes\". "
+                        "Fulfill the offer you made (call a tool if needed). "
+                        "If you offered an HTML chart, call get_chart_html."
+                    )
+                    log.info("expanded yes via last_reply for {}", uid)
             async with client.action(event.chat_id, "typing"):
                 result: AgentResult = await agent.reply(text)
             # Update follow-up context for the next "yes"
@@ -225,20 +241,32 @@ async def _amain() -> None:
                 follow_up_store[uid] = result.chart_context
             else:
                 follow_up_store.pop(uid, None)
+            last_reply_store[uid] = result.text
             reply_text = result.text
             if remaining <= 3:
                 reply_text += f"\n\n_({remaining} question{'s' if remaining != 1 else ''} remaining in this 3-hour window)_"
+            import io
             if result.chart_png:
-                import io
+                bio = io.BytesIO(result.chart_png)
+                bio.name = result.chart_filename or "chart.png"
                 await client.send_file(
                     event.chat_id,
-                    io.BytesIO(result.chart_png),
+                    bio,
                     caption=reply_text,
                     reply_to=event.id,
                     force_document=False,
                 )
             else:
                 await event.reply(reply_text)
+            if result.chart_html:
+                bio_html = io.BytesIO(result.chart_html)
+                bio_html.name = result.chart_html_filename or "chart.html"
+                await client.send_file(
+                    event.chat_id,
+                    bio_html,
+                    reply_to=event.id,
+                    force_document=True,
+                )
 
         await client.start(bot_token=settings.telegram_bot_token)
         log.info("CoinOwl bot is up. Send it a message on Telegram.")
