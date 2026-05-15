@@ -25,6 +25,7 @@ class Settings:
     openai_model: str              # default: gpt-5.4-mini
     anthropic_api_key: str | None  # last-resort fallback LLM
     coingecko_api_key: str | None  # demo plan key, optional
+    database_url: str              # Supabase Postgres (session pooler, port 5432)
 
 
 def _require(name: str) -> str:
@@ -61,4 +62,5 @@ def load_settings() -> Settings:
         openai_model=os.environ.get("OPENAI_MODEL", "").strip() or "gpt-5.4-mini",
         anthropic_api_key=_optional("ANTHROPIC_API_KEY"),
         coingecko_api_key=_optional("COINGECKO_API_KEY"),
+        database_url=_require("DATABASE_URL"),
     )

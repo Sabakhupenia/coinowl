@@ -2,7 +2,7 @@
 
 CoinOwl is a Telegram bot for cryptocurrency analytics. Users chat in plain text (English, Georgian, Russian) and the bot replies with live prices, historical stats, and price chart images fetched from CoinGecko. It is explicitly a *statistics tool* — it never predicts prices or gives financial advice, enforced by both a system prompt and a regex guardrail. Single developer, pre-alpha, proprietary.
 
-**Stack:** Python 3.12 · Telethon (Telegram MTProto client) · openai (gpt-5.4-mini, primary LLM for non-chart messages) · google-genai (Gemini 2.5 Flash, primary for chart messages) · anthropic (Claude Haiku 4.5, last-resort fallback) · httpx + CoinGecko REST API · Plotly + kaleido (PNG/HTML chart rendering) · loguru (structured logging) · python-dotenv
+**Stack:** Python 3.12 · Telethon (Telegram MTProto client) · openai (gpt-5.4-mini, primary LLM for non-chart messages) · google-genai (Gemini 2.5 Flash, primary for chart messages; `gemini-embedding-001` @ 768d for message embeddings) · anthropic (Claude Haiku 4.5, last-resort fallback) · Supabase Postgres + asyncpg + pgvector (user profile, quota, chat history with embeddings) · httpx + CoinGecko REST API · Plotly + kaleido (PNG/HTML chart rendering, brand gold-on-navy palette) · loguru (structured logging) · python-dotenv
 
 ---
 
@@ -26,6 +26,7 @@ python main.py
 | `TELEGRAM_API_HASH` | same |
 | `TELEGRAM_BOT_TOKEN` | @BotFather on Telegram |
 | `GEMINI_API_KEY` | aistudio.google.com |
+| `DATABASE_URL` | Supabase Session Pooler URL (port 5432). Dashboard → Settings → Database → "Session Pooler". Enable the `vector` extension at Database → Extensions before first run. |
 
 **Optional:**
 
@@ -53,7 +54,8 @@ main.py
                                      chart keywords → Gemini → OpenAI → Claude
                                      otherwise      → OpenAI → Gemini → Claude
               └── execute_tool()   dispatches get_price / get_market_chart /
-                                   get_chart / get_chart_html
+                                   get_top_movers / get_chart / get_chart_html /
+                                   set_user_profile
                     ├── coinowl/data/coingecko.py        async HTTP, TTL cache
                     ├── coinowl/data/symbols.py          ticker → CoinGecko ID
                     └── coinowl/charts/plotly_chart.py   bar PNG via kaleido,
@@ -109,12 +111,16 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 **Ticker map:** `coinowl/data/symbols.py` — 20 tickers hardcoded. `resolve(symbol)` is case-insensitive; unknown symbols pass through as-is (CoinGecko accepts full IDs like `the-open-network`).
 
+**Postgres-backed state (persists across restarts):**
+- `users` — identity, display_name, preferred_languages, watched_coins, onboarded flag, digest config
+- `quota_log` — rolling per-user message-rate window (replaces in-memory `QuotaTracker`)
+- `messages` — full chat history (user + assistant turns) with Gemini 768d embeddings for RAG over past Q&A
+
 **In-memory state (resets on restart):**
-- `QuotaTracker._log: dict[int, deque[datetime]]` — per user_id rolling window
 - `follow_up_store: dict[int, dict]` in `bot/main.py` — last chart context per user for "yes" expansion (when a chart tool ran)
 - `last_reply_store: dict[int, str]` in `bot/main.py` — last assistant text per user; used when "yes" arrives but no chart tool was called (multi-turn-lite)
 
-**No database yet.** `coinowl/db/__init__.py` is a placeholder. Supabase (hosted Postgres + pgvector) is planned for v2 (persistent quota, user records, conversation history, coin embeddings for `/similar`).
+**Database:** Supabase Postgres with `pgvector`. Schema lives in versioned `migrations/NNN_*.sql` files at the project root; `coinowl/db/migrate.py` runs them once on startup, tracked in `schema_versions`. asyncpg pool is the only DB driver — no `psycopg2` (it's sync and would block the event loop). Watchlist/alerts/digest tables land in v0.7.1+.
 
 **Secrets:** `.env` only, gitignored. Never in `.env.example`, never in logs (loguru file sink at `logs/coinowl.log`).
 
@@ -146,7 +152,21 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **kaleido < 1.0 is broken** as of 2026. `kaleido>=1.0` is required (pinned in requirements.txt). kaleido 0.2.x deprecated itself; `fig.to_image()` hangs or fails silently on that version.
 
-- **kaleido first render** takes 10–20 seconds (starts a headless browser subprocess). Subsequent renders in the same process are fast (~1s). Don't mistake the first slow render for a hang.
+- **kaleido first render** takes 10–20 seconds (starts a headless browser subprocess). Subsequent renders in the same process are fast (~1s). Don't mistake the first slow render for a hang. The sparkline rendered per stats reply doubles render volume — caching is v2/Supabase work.
+
+- **Telegram edit rate limit** is roughly 1 edit per second per message. `StreamingReply` in `bot/main.py` debounces via a single pending task; never call `msg.edit` directly from elsewhere when streaming is active or you'll trip `FloodWait`.
+
+- **Telethon parse mode is HTML.** Set on `client.parse_mode = "html"` at startup. Any bot-generated text that flows into Telegram (LLM replies, captions, status edits, hardcoded `_HELP_TEXT` etc.) must be HTML-safe — run dynamic strings through `_esc()` (which is `html.escape`). Hardcoded constants need literal `<` / `>` replaced with `&lt;` / `&gt;` in source. The quota footer uses `<blockquote>…</blockquote>` for a colored vertical bar.
+
+- **Supabase direct connection (`db.<ref>.supabase.co:5432`) is IPv6-only** without the paid IPv4 add-on. Use the **Session Pooler** URL instead (`aws-0-<region>.pooler.supabase.com:5432`, compound username `postgres.<project-ref>`). Direct port 5432 will hang on connect from IPv4-only networks.
+
+- **`pgvector` ivfflat indexes** cap at 2000 dimensions; we pin Gemini embeddings to **768d** via `output_dimensionality=768` to stay inside that limit. Switching providers/sizes is a schema change (the `vector(N)` column type carries the dimension).
+
+- **Message logging is fire-and-forget.** Each chat turn spawns `asyncio.create_task(log_message(...))` instead of awaiting — embeddings + INSERTs must not block the user-facing reply.
+
+- **No `psycopg2`.** Supabase's quickstart suggests it; ignore. We're async-first and use `asyncpg`.
+
+- **Brand palette is fixed.** Gold (`#D4AF37`) line, soft gold fill, dark navy (`#0a0a1a`) paper, cream (`#F5E6C8`) text, copper (`#C04A2A`) for negative sparklines. Don't reintroduce the old green-on-blue scheme. If `assets/logo.png` exists (transparent-bg PNG), it's embedded bottom-right at ~35% opacity; missing file → chart renders without it (no failure).
 
 - **CoinGecko free tier** is ~5 req/min in practice, much tighter than documented 10-50 req/min. TTL cache handles typical traffic; set `COINGECKO_API_KEY` (demo plan) for anything beyond casual testing.
 
@@ -172,29 +192,36 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - Claude Haiku 4.5 as last-resort fallback (when `ANTHROPIC_API_KEY` set)
 - `/price`, `/start`, `/help`, `/version`, `/disclaimer` commands
 - `get_price` and `get_market_chart` LLM tools
-- `get_chart` tool → Plotly **bar** chart PNG sent inline as Telegram photo (named `SYM_Nd.png`)
+- `get_top_movers` tool → top N gainers/losers across the whole market in 24h/7d/30d, via CoinGecko `/coins/markets`. Handles "biggest losers today", "top gainers this week" style questions in EN/KA/RU
+- `get_chart` tool → Plotly **area** chart PNG (y-axis zoomed to actual price range, not anchored at $0) sent inline as Telegram photo (named `SYM_Nd.png`)
 - `get_chart_html` tool → interactive Plotly HTML sent as Telegram document; offered after every PNG chart, only generated when user confirms
-- Colored-square mini-chart (🟩🟥) in text stats replies
-- Follow-up "yes"/"კი"/"да" expansion: chart context if a chart tool ran, else last-reply preamble passed back to the LLM (multi-turn-lite)
+- 200×40 inline **sparkline PNG** auto-attached to every stats reply (replaces the old 🟩🟥 emoji-square mini-chart)
+- Streaming responses with tool-call status: bot sends "🦉 …" placeholder, edits it to "🔎 Looking up BTC price…" while CoinGecko fetches, then streams the LLM's text reply via debounced edits (~1 edit/sec to respect Telegram throttle)
+- Follow-up "yes"/"კი"/"да" expansion: **prefers** last-reply preamble when the LLM's prior offer mentioned chart/HTML (so a "yes" to "Want a chart?" actually fires `get_chart`); falls back to chart-context shortcut for stats follow-ups
 - In-memory quota: 10 messages / 3-hour window
 - Identity prefilter ("who are you" → /help, no API call)
 - loguru structured logging to stderr + `logs/coinowl.log` in Tbilisi time
 
 **Placeholder / not started:**
-- `coinowl/db/` — empty, waiting for Postgres+pgvector commit
-- Persistent multi-turn conversation memory beyond the last-reply hack
-- Quota persistence across restarts
-- Server-side cache of generated charts (re-renders identical bar/HTML on every call today)
+- Watchlist + onboarding watchlist tools + market summaries (v0.7.1)
+- Price alerts (v0.7.2)
+- Daily digest scheduler (v0.7.3)
+- News fetcher + `knowledge_chunks` RAG (CoinDesk RSS source decided; subsystem unbuilt)
+- `coins` table + `/similar` tool (needs CoinGecko coin-detail bootstrap)
+- Server-side cache of generated charts (re-renders identical chart/HTML on every call today)
 - Any tests or CI
 
 ---
 
 ## Roadmap
 
-1. **Test suite + bugfixes (now):** unit tests for guardrail regex, `_mini_chart`, `QuotaTracker`, `resolve()`, and the yes-expansion logic. Fix any bugs found during live testing.
-2. **v2 — Supabase (Postgres + pgvector):** persistent user records, quota, conversation history, coin embeddings for `/similar`, **cache of rendered charts (PNG + HTML) keyed by `chart_context` so identical requests don't hit kaleido/CoinGecko twice**. Connect via Supabase Python client or psycopg. No SQLite intermediate.
-3. **v3 — Alerts:** user-configured price alerts, background polling loop.
-4. **CI/CD:** GitHub Actions workflow for import smoke tests and lint on push.
+1. **v0.7.1 — Watchlist + market summaries:** new tools (`set_watchlist`, `get_watchlist`, `get_market_summary`), composite summary charts (vertical stack + normalized comparison overlay), watchlist onboarding step (extends the existing name+language onboarding).
+2. **v0.7.2 — Price alerts:** `alerts` table, user-configured polling intervals (5m / 30m / 1h / daily / custom), background watcher task that wakes per-alert, Telegram push on threshold cross. Example user-flow: "tell me when BTC reaches $80k or drops below $75k" → bot stores two alerts → watcher pings user when either threshold crosses. Survives bot restart (state lives in Postgres).
+3. **v0.7.3 — Daily digest:** per-user schedule, auto-pushed market summary at configured hour.
+4. **News RAG:** CoinDesk RSS → `knowledge_chunks` with Gemini embeddings → grounded "why did X drop?" answers.
+5. **`/similar` tool:** bootstrap `coins` table from CoinGecko coin-detail endpoints + embed; vector similarity search.
+6. **Chart render cache:** key by `(symbol, days, kind)`; skip kaleido on repeats.
+7. **Test suite + CI:** unit tests for guardrail regex, `wants_chart`, `resolve()`, yes-expansion, quota math. GitHub Actions for import smoke + lint.
 
 ---
 

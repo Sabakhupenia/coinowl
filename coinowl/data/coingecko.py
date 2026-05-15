@@ -73,6 +73,7 @@ _CACHE_MISS: object = object()
 class CoinGeckoClient:
     PRICE_TTL_SEC = 30.0
     MARKET_CHART_TTL_SEC = 300.0
+    MARKETS_TTL_SEC = 60.0
 
     def __init__(
         self,
@@ -159,6 +160,45 @@ class CoinGeckoClient:
         ]
         self._cache_put(key, points, self.MARKET_CHART_TTL_SEC)
         return points
+
+    async def get_markets(
+        self,
+        *,
+        vs_currency: str = "usd",
+        per_page: int = 250,
+        page: int = 1,
+        price_change_percentage: str = "24h,7d,30d",
+        order: str = "market_cap_desc",
+    ) -> list[dict[str, Any]]:
+        """Top coins by market cap with price change %s in selected windows.
+
+        Returns a list of dicts with keys: id, symbol, name, current_price,
+        market_cap, market_cap_rank, price_change_percentage_24h_in_currency,
+        price_change_percentage_7d_in_currency,
+        price_change_percentage_30d_in_currency.
+        """
+        key = ("markets", vs_currency, per_page, page, price_change_percentage, order)
+        cached = self._cache_get(key)
+        if cached is not _CACHE_MISS:
+            return cached  # type: ignore[return-value]
+
+        payload = await self._get(
+            "/coins/markets",
+            params={
+                "vs_currency": vs_currency,
+                "order": order,
+                "per_page": per_page,
+                "page": page,
+                "price_change_percentage": price_change_percentage,
+                "sparkline": "false",
+            },
+        )
+        if not isinstance(payload, list):
+            raise CoinGeckoError(
+                f"Unexpected /coins/markets response: {str(payload)[:200]}"
+            )
+        self._cache_put(key, payload, self.MARKETS_TTL_SEC)
+        return payload
 
     def _cache_get(self, key: tuple[Any, ...]) -> object:
         if self._cache is None:

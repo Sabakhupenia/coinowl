@@ -11,15 +11,28 @@ v0.3.1 surface:
 from __future__ import annotations
 
 import asyncio
+import html as _html
+import io
 import re
+import time
+from typing import Any
+
+
+def _esc(s: str) -> str:
+    return _html.escape(s or "", quote=False)
 
 from telethon import TelegramClient, events
+from telethon.errors import MessageNotModifiedError
 
 from coinowl import __version__
 from coinowl.agent import Agent, AgentResult
+from coinowl.agent.main import wants_chart
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
-from coinowl.core.quota import QuotaTracker
+from coinowl.db import close_db, init_db
+from coinowl.db import quota as db_quota
+from coinowl.db import users as db_users
+from coinowl.db.messages import _init_embedding_client, log_message
 from coinowl.data.coingecko import (
     ATTRIBUTION,
     CoinGeckoClient,
@@ -62,7 +75,7 @@ _HELP_TEXT = (
     "  /start — greet\n"
     "  /help — show this message\n"
     "  /version — show bot version\n"
-    "  /price <symbol> — quick spot price (e.g. /price BTC)\n"
+    "  /price &lt;symbol&gt; — quick spot price (e.g. /price BTC)\n"
     "  /disclaimer — read the full 'not financial advice' notice"
 )
 
@@ -87,7 +100,7 @@ _DISCLAIMER_TEXT = (
 )
 
 _PRICE_USAGE_TEXT = (
-    "Usage: /price <symbol>\n"
+    "Usage: /price &lt;symbol&gt;\n"
     "Example: /price BTC\n"
     "\n"
     "Known tickers: " + ", ".join(SYMBOLS.keys()) + "\n"
@@ -111,7 +124,9 @@ _IDENTITY_RE = re.compile(
 )
 
 _YES_RE = re.compile(
-    r"^\s*(yes|sure|ok|okay|yep|yeah|please|go ahead|კი|да|ок)\s*[!.,?]*\s*$",
+    r"^\s*(yes|sure|ok|okay|yep|yeah|please|go ahead"
+    r"|კი|კარგი|კარგია"
+    r"|да|ок|хорошо|давай)\s*[!.,?]*\s*$",
     re.IGNORECASE,
 )
 
@@ -128,14 +143,219 @@ def _expand_follow_up(ctx: dict) -> str:
     return f"how did {ctx['symbol']} do {period}?"
 
 
+def _yes_preamble(last_offer: str) -> str:
+    return (
+        f"Earlier you replied: \"{last_offer}\"\n"
+        "The user has now answered: \"yes\". "
+        "Fulfill the offer you made (call a tool if needed). "
+        "If you offered an HTML chart, call get_chart_html."
+    )
+
+
+_TOOL_STATUS = {
+    "get_price": "🔎 Looking up {symbol} price...",
+    "get_market_chart": "📊 Fetching {symbol} {days}d history...",
+    "get_chart": "🎨 Rendering {symbol} chart...",
+    "get_chart_html": "🎨 Building interactive HTML...",
+}
+
+
+def _tool_status(name: str, args: dict[str, Any]) -> str:
+    template = _TOOL_STATUS.get(name)
+    if template is None:
+        return f"⚙️ {name}..."
+    symbol = str(args.get("symbol", "")).upper() or "…"
+    days = args.get("days", "")
+    return template.format(symbol=symbol, days=days)
+
+
+class StreamingReply:
+    """Progressive Telegram reply: send placeholder, edit while bot is working.
+
+    Telegram throttles message edits to roughly 1/sec per message; this class
+    debounces edits via a single pending task so we never exceed that.
+    """
+
+    _PLACEHOLDER = "🦉 ..."
+    _MIN_INTERVAL = 1.0
+
+    def __init__(self, event: events.NewMessage.Event, client: TelegramClient) -> None:
+        self._event = event
+        self._client = client
+        self._msg: Any = None
+        self._current_display = ""
+        self._last_edit_ts = 0.0
+        self._pending_task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+        self._buffer = ""
+        self._status = ""
+        self._finalized = False
+
+    async def start(self) -> None:
+        self._msg = await self._event.reply(self._PLACEHOLDER)
+        self._current_display = self._PLACEHOLDER
+        self._last_edit_ts = time.monotonic()
+
+    async def on_progress(self, ev: dict[str, Any]) -> None:
+        t = ev.get("type")
+        if t == "tool_call_start":
+            self._status = _tool_status(ev.get("tool", ""), ev.get("args") or {})
+            await self._schedule_edit()
+        elif t == "tool_call_done":
+            # keep the status line until text starts arriving; nothing to do
+            pass
+        elif t == "text_delta":
+            delta = ev.get("delta", "")
+            if delta:
+                self._buffer += delta
+                self._status = ""  # text now takes precedence over status
+                await self._schedule_edit()
+
+    def _render(self) -> str:
+        # Bot is in HTML parse mode; LLM-streamed and tool-derived strings must
+        # be escaped. `finalize()` receives already-formatted text from callers
+        # and is exempt from re-escaping.
+        if self._buffer:
+            return _esc(self._buffer)
+        if self._status:
+            return _esc(self._status)
+        return self._PLACEHOLDER
+
+    async def _edit_now(self) -> None:
+        if self._msg is None or self._finalized:
+            return
+        text = self._render()
+        if text == self._current_display:
+            return
+        try:
+            await self._msg.edit(text)
+            self._current_display = text
+            self._last_edit_ts = time.monotonic()
+        except MessageNotModifiedError:
+            self._current_display = text
+        except Exception as exc:  # noqa: BLE001 — never let edit failures break the turn
+            log.warning("streaming edit failed: {}", exc)
+
+    async def _schedule_edit(self) -> None:
+        async with self._lock:
+            wait = self._last_edit_ts + self._MIN_INTERVAL - time.monotonic()
+            if wait <= 0:
+                if self._pending_task and not self._pending_task.done():
+                    self._pending_task.cancel()
+                    self._pending_task = None
+                await self._edit_now()
+                return
+            if self._pending_task and not self._pending_task.done():
+                return
+            self._pending_task = asyncio.create_task(self._delayed_edit(wait))
+
+    async def _delayed_edit(self, wait: float) -> None:
+        try:
+            await asyncio.sleep(wait)
+            await self._edit_now()
+        except asyncio.CancelledError:
+            return
+
+    async def finalize(self, text: str) -> None:
+        self._finalized = True
+        if self._pending_task and not self._pending_task.done():
+            self._pending_task.cancel()
+        if self._msg is None:
+            return
+        if text:
+            if text != self._current_display:
+                try:
+                    await self._msg.edit(text)
+                except MessageNotModifiedError:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("streaming finalize edit failed: {}", exc)
+        else:
+            try:
+                await self._msg.delete()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("streaming placeholder delete failed: {}", exc)
+
+
 def _is_not_command(event: events.NewMessage.Event) -> bool:
     # Slash-commands have dedicated handlers; everything else goes to the LLM.
     return not (event.raw_text or "").startswith("/")
 
 
+def _user_context_block(db_user: dict, *, remaining: int) -> str | None:
+    if not db_user.get("onboarded") or not db_user.get("display_name"):
+        return None
+    langs = ", ".join(db_user.get("preferred_languages") or ["en"])
+    parts = [
+        "## CURRENT USER",
+        f"Name: {db_user['display_name']}",
+        f"Preferred languages: {langs}",
+        f"Quota: {remaining} of 10 messages remaining in the current 3-hour rolling window.",
+    ]
+    if remaining == 0:
+        parts.append(
+            "THIS IS THE USER'S LAST MESSAGE in the current window. Do NOT add a "
+            "follow-up offer (no 'shall I check anything else?', no 'want me to look "
+            "at X too?'). Deliver a complete answer and stop."
+        )
+    parts.append(
+        "Address them by name naturally — sprinkle it in once or twice, not every sentence."
+    )
+    return "\n".join(parts)
+
+
+def _onboarding_wrap(
+    original_text: str,
+    *,
+    prior_user_messages: list[str] | None = None,
+    last_bot_reply: str | None = None,
+) -> str:
+    history_block = ""
+    if prior_user_messages and len(prior_user_messages) > 1:
+        # all except the current message
+        earlier = prior_user_messages[:-1]
+        history_block += (
+            "\n\nPREVIOUS USER MESSAGES DURING THIS ONBOARDING:\n"
+            + "\n".join(f'- "{m}"' for m in earlier)
+        )
+    if last_bot_reply:
+        history_block += f"\n\nYOUR PREVIOUS REPLY: \"{last_bot_reply}\""
+    return (
+        "<onboarding>\n"
+        f"This user is being onboarded. Their latest message: \"{original_text}\"."
+        f"{history_block}\n"
+        "\n"
+        "Your task: collect TWO pieces of info before doing anything else —\n"
+        "  (1) preferred display name to call them by\n"
+        "  (2) at least one language they want the bot to use (en, ka, ru, …)\n"
+        "\n"
+        "PROGRESS TRACKING — IMPORTANT:\n"
+        "Read the conversation above. If the user has ALREADY given their name "
+        "in any earlier message, remember it. If they've already named "
+        "language(s), remember those. Ask ONLY for whichever piece is still "
+        "missing — do not re-ask for both. When reminding them about a missing "
+        "field, lead with the ⚠️ emoji, e.g. \"⚠️ I still need your name — what "
+        "should I call you?\" or \"⚠️ Which language(s) should I use with you?\".\n"
+        "\n"
+        "LANGUAGE RULE — STRICT: write your reply ENTIRELY in the language of "
+        "the latest message above. If it's in Georgian (ქართული alphabet, e.g. "
+        "\"ჰი\", \"გამარჯობა\"), reply WHOLLY in Georgian — every sentence. Same "
+        "for Russian (Cyrillic). Do NOT mix English explanations into a "
+        "non-English reply. Only technical tokens like 'BTC', 'ETH' stay as-is.\n"
+        "\n"
+        "When you have BOTH name AND at least one language from the "
+        "conversation, call set_user_profile and confirm warmly. Until then, "
+        "do NOT call set_user_profile and do NOT call any other tools.\n"
+        "</onboarding>"
+    )
+
+
 async def _amain() -> None:
     settings = load_settings()
+    await init_db(settings.database_url)
+    _init_embedding_client(settings.gemini_api_key)
     client = _build_client(settings)
+    client.parse_mode = "html"
 
     async with CoinGeckoClient(api_key=settings.coingecko_api_key) as cg:
         agent = Agent(
@@ -146,9 +366,12 @@ async def _amain() -> None:
             anthropic_api_key=settings.anthropic_api_key,
             coingecko=cg,
         )
-        quota = QuotaTracker()
         follow_up_store: dict[int, dict] = {}
         last_reply_store: dict[int, str] = {}
+        # Per-user list of user messages collected during onboarding. Cleared
+        # once the user becomes onboarded. Lets the LLM remember partial info
+        # across onboarding turns (e.g. user gave language but not name yet).
+        onboarding_history: dict[int, list[str]] = {}
 
         @client.on(events.NewMessage(pattern=r"^/start(?:\s|$|@)"))
         async def start(event: events.NewMessage.Event) -> None:
@@ -179,7 +402,7 @@ async def _amain() -> None:
                 value = await cg.get_price(coin_id)
             except CoinGeckoUnknownCoinError:
                 await event.reply(
-                    f"I don't recognize {arg!r}. Try a known ticker (see /price) "
+                    f"I don't recognize {_esc(repr(arg))}. Try a known ticker (see /price) "
                     "or a full CoinGecko coin ID."
                 )
                 return
@@ -195,58 +418,85 @@ async def _amain() -> None:
                 return
 
             await event.reply(
-                f"🦉 {arg.upper()}  ${value:,.2f}\n"
+                f"🦉 {_esc(arg.upper())}  ${value:,.2f}\n"
                 f"\n"
-                f"{ATTRIBUTION}"
+                f"{_esc(ATTRIBUTION)}"
             )
 
         @client.on(events.NewMessage(func=_is_not_command))
         async def chat(event: events.NewMessage.Event) -> None:
-            text = (event.raw_text or "").strip()
-            if not text:
+            original_text = (event.raw_text or "").strip()
+            if not original_text:
                 return  # ignore stickers / empty / media-only messages
-            log.info("chat from {}: {!r}", event.sender_id, text)
-            if _IDENTITY_RE.search(text):
+            log.info("chat from {}: {!r}", event.sender_id, original_text)
+            if _IDENTITY_RE.search(original_text):
                 await event.reply(_HELP_TEXT)
                 return
-            allowed, remaining = quota.check_and_consume(event.sender_id)
+            uid = event.sender_id
+            sender = await event.get_sender()
+            tg_username = getattr(sender, "username", None)
+            db_user = await db_users.get_or_create_user(uid, tg_username)
+            allowed, remaining = await db_quota.check_and_consume(uid)
             if not allowed:
                 await event.reply(
                     "You've used all 10 questions for this 3-hour window. "
                     "Come back later!"
                 )
                 return
-            # Expand short affirmations ("yes", "კი", "да") to the last follow-up query.
-            # If no chart context is stored but we have the LLM's previous reply, hand
-            # that reply back as context so the model can fulfill its own text offer
-            # (e.g. "Want the 30-day chart?" or "Want the HTML version?") that didn't
-            # come from a tool call.
-            uid = event.sender_id
-            if _YES_RE.match(text):
-                if uid in follow_up_store:
+            text = original_text
+            # Expand short affirmations ("yes", "კი", "да") — but ONLY for
+            # already-onboarded users. During onboarding, "კარგი" might be a
+            # courtesy or a yes; the wrap below gives the LLM enough context
+            # to decide. Stacking yes-preamble + onboarding wrap is incoherent.
+            if db_user.get("onboarded") and _YES_RE.match(text):
+                last_offer = last_reply_store.get(uid, "")
+                if last_offer and wants_chart(last_offer):
+                    follow_up_store.pop(uid, None)
+                    text = _yes_preamble(last_offer)
+                    log.info("expanded yes via last_reply (chart intent) for {}", uid)
+                elif uid in follow_up_store:
                     text = _expand_follow_up(follow_up_store.pop(uid))
                     log.info("expanded follow-up for {}: {!r}", uid, text)
-                elif uid in last_reply_store:
-                    text = (
-                        f"Earlier you replied: \"{last_reply_store[uid]}\"\n"
-                        "The user has now answered: \"yes\". "
-                        "Fulfill the offer you made (call a tool if needed). "
-                        "If you offered an HTML chart, call get_chart_html."
-                    )
+                elif last_offer:
+                    text = _yes_preamble(last_offer)
                     log.info("expanded yes via last_reply for {}", uid)
-            async with client.action(event.chat_id, "typing"):
-                result: AgentResult = await agent.reply(text)
+            # Onboarding wrap for new users (until they've supplied name+language).
+            # We feed the LLM the full onboarding history so it can track which
+            # piece(s) the user has already provided and ask only for what's missing.
+            if not db_user.get("onboarded"):
+                onboarding_history.setdefault(uid, []).append(original_text)
+                text = _onboarding_wrap(
+                    original_text,
+                    prior_user_messages=onboarding_history[uid],
+                    last_bot_reply=last_reply_store.get(uid),
+                )
+                user_context = None
+            else:
+                onboarding_history.pop(uid, None)  # cleanup if user is already onboarded
+                user_context = _user_context_block(db_user, remaining=remaining)
+            streaming = StreamingReply(event, client)
+            await streaming.start()
+            result: AgentResult = await agent.reply(
+                text,
+                on_progress=streaming.on_progress,
+                uid=uid,
+                user_context=user_context,
+            )
             # Update follow-up context for the next "yes"
             if result.chart_context:
                 follow_up_store[uid] = result.chart_context
             else:
                 follow_up_store.pop(uid, None)
             last_reply_store[uid] = result.text
-            reply_text = result.text
+            reply_text = _esc(result.text)
             if remaining <= 3:
-                reply_text += f"\n\n_({remaining} question{'s' if remaining != 1 else ''} remaining in this 3-hour window)_"
-            import io
+                reply_text += (
+                    f"\n\n<blockquote>{remaining} question"
+                    f"{'s' if remaining != 1 else ''} remaining in this 3-hour window"
+                    f"</blockquote>"
+                )
             if result.chart_png:
+                await streaming.finalize("")
                 bio = io.BytesIO(result.chart_png)
                 bio.name = result.chart_filename or "chart.png"
                 await client.send_file(
@@ -256,8 +506,19 @@ async def _amain() -> None:
                     reply_to=event.id,
                     force_document=False,
                 )
+            elif result.sparkline_png:
+                await streaming.finalize("")
+                bio = io.BytesIO(result.sparkline_png)
+                bio.name = result.sparkline_filename or "spark.png"
+                await client.send_file(
+                    event.chat_id,
+                    bio,
+                    caption=reply_text,
+                    reply_to=event.id,
+                    force_document=False,
+                )
             else:
-                await event.reply(reply_text)
+                await streaming.finalize(reply_text)
             if result.chart_html:
                 bio_html = io.BytesIO(result.chart_html)
                 bio_html.name = result.chart_html_filename or "chart.html"
@@ -267,10 +528,21 @@ async def _amain() -> None:
                     reply_to=event.id,
                     force_document=True,
                 )
+            # Fire-and-forget message logging — never block the reply path
+            asyncio.create_task(log_message(uid, "user", original_text))
+            asyncio.create_task(log_message(
+                uid, "assistant", result.text,
+                llm_provider=result.provider_used,
+                llm_model=result.model_used,
+                tool_calls=result.tool_calls_made,
+            ))
 
         await client.start(bot_token=settings.telegram_bot_token)
         log.info("CoinOwl bot is up. Send it a message on Telegram.")
-        await client.run_until_disconnected()
+        try:
+            await client.run_until_disconnected()
+        finally:
+            await close_db()
 
 
 def run() -> None:

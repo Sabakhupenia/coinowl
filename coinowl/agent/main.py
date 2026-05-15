@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,7 +40,7 @@ from coinowl.data.coingecko import (
     CoinGeckoRateLimitError,
     CoinGeckoUnknownCoinError,
 )
-from coinowl.charts.plotly_chart import generate_chart, generate_chart_html
+from coinowl.charts.plotly_chart import generate_chart, generate_chart_html, generate_sparkline
 from coinowl.data.symbols import resolve
 
 log = get_logger(__name__)
@@ -64,13 +65,16 @@ def wants_chart(text: str) -> bool:
     return bool(_CHART_INTENT_RE.search(text))
 
 
-def _mini_chart(prices: list[float], buckets: int = 8) -> str:
-    """Return colored-square mini-chart: 🟩 = up, 🟥 = down vs previous sample."""
-    if len(prices) < 2:
-        return ""
-    step = max(1, len(prices) // buckets)
-    sampled = [prices[i] for i in range(0, len(prices), step)][:buckets]
-    return "".join("🟩" if sampled[i] >= sampled[i - 1] else "🟥" for i in range(1, len(sampled)))
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+async def _emit(cb: ProgressCallback | None, event: dict[str, Any]) -> None:
+    if cb is None:
+        return
+    try:
+        await cb(event)
+    except Exception as exc:  # noqa: BLE001 — progress callback must not break the turn
+        log.warning("on_progress callback raised: {}", exc)
 
 
 @dataclass
@@ -80,7 +84,12 @@ class AgentResult:
     chart_filename: str | None = field(default=None)
     chart_html: bytes | None = field(default=None)
     chart_html_filename: str | None = field(default=None)
+    sparkline_png: bytes | None = field(default=None)
+    sparkline_filename: str | None = field(default=None)
     chart_context: dict | None = field(default=None)  # {"symbol": str, "days": int}
+    provider_used: str | None = field(default=None)   # 'openai' | 'gemini' | 'claude'
+    model_used: str | None = field(default=None)
+    tool_calls_made: list[dict[str, Any]] | None = field(default=None)
 
 
 _MAX_TOOL_ITERATIONS = 5
@@ -102,6 +111,18 @@ def passes_guardrail(text: str) -> bool:
     return not any(p.search(text) for p in _PREDICTION_PATTERNS)
 
 
+_DELIVERABLE_KEYS = ("chart_png", "chart_html", "sparkline_png")
+
+
+def _max_iter_text(side_effects: dict[str, Any]) -> str:
+    """When max tool iterations is hit, prefer a soft message if we already
+    produced something deliverable (a chart, html, sparkline) during the loop.
+    Otherwise admit confusion."""
+    if any(side_effects.get(k) for k in _DELIVERABLE_KEYS):
+        return "Here's what you asked for."
+    return "I got stuck thinking about that. Could you rephrase your question?"
+
+
 # ---------------------------------------------------------------------------
 # Tool dispatcher — shared by both providers.
 # ---------------------------------------------------------------------------
@@ -112,13 +133,87 @@ async def execute_tool(
     args: dict[str, Any],
     cg: CoinGeckoClient,
     side_effects: dict[str, Any] | None = None,
+    uid: int | None = None,
 ) -> dict[str, Any]:
     """Run one tool call and return a JSON-serializable result dict.
 
     Returning errors as dict payloads (rather than raising) lets the LLM
     surface a natural apology to the user instead of dropping the whole turn.
     Non-text side effects (chart context) are written into `side_effects` if provided.
+    `uid` is required by user-scoped tools (set_user_profile, etc.); price/chart
+    tools ignore it.
     """
+    if tool_name == "set_user_profile":
+        if uid is None:
+            return {"error": "Internal: uid not available for set_user_profile"}
+        name = str(args.get("name", "")).strip()
+        langs = args.get("languages") or []
+        if not isinstance(langs, list):
+            langs = [str(langs)]
+        langs = [str(lang).strip().lower() for lang in langs if str(lang).strip()]
+        if not name or not langs:
+            return {"error": "Both 'name' and at least one language are required"}
+        from coinowl.db import users as db_users
+        try:
+            await db_users.set_profile(uid, display_name=name, preferred_languages=langs)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("set_user_profile DB write failed: {}", exc)
+            return {"error": "Could not save profile; try again"}
+        return {"profile_set": True, "name": name, "languages": langs}
+
+    if tool_name == "get_top_movers":
+        direction = str(args.get("direction", "")).strip().lower()
+        if direction not in ("gainers", "losers"):
+            return {"error": "Argument 'direction' must be 'gainers' or 'losers'"}
+        window = str(args.get("window", "24h")).strip().lower()
+        if window not in ("24h", "7d", "30d"):
+            window = "24h"
+        try:
+            limit = int(args.get("limit", 10))
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(20, limit))
+
+        try:
+            markets = await cg.get_markets(
+                price_change_percentage="24h,7d,30d",
+                per_page=250,
+            )
+        except CoinGeckoRateLimitError:
+            return {"error": "CoinGecko is rate-limiting; back off and try later"}
+        except CoinGeckoError as exc:
+            log.warning("get_top_movers failed: {}", exc)
+            return {"error": "CoinGecko request failed; try again"}
+
+        key_map = {
+            "24h": "price_change_percentage_24h_in_currency",
+            "7d": "price_change_percentage_7d_in_currency",
+            "30d": "price_change_percentage_30d_in_currency",
+        }
+        pct_key = key_map[window]
+        scored = [
+            (m, m.get(pct_key))
+            for m in markets
+            if isinstance(m.get(pct_key), (int, float))
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=(direction == "gainers"))
+        top = scored[:limit]
+        return {
+            "direction": direction,
+            "window": window,
+            "movers": [
+                {
+                    "symbol": (m.get("symbol") or "").upper(),
+                    "name": m.get("name"),
+                    "price_usd": m.get("current_price"),
+                    "market_cap_rank": m.get("market_cap_rank"),
+                    "change_pct": round(float(pct), 2),
+                }
+                for m, pct in top
+            ],
+            "attribution": ATTRIBUTION,
+        }
+
     if tool_name == "get_price":
         symbol = str(args.get("symbol", "")).strip()
         if not symbol:
@@ -169,6 +264,12 @@ async def execute_tool(
         change_pct = (last.price - first.price) / first.price * 100 if first.price else 0.0
         if side_effects is not None:
             side_effects["chart_context"] = {"symbol": symbol.upper(), "days": days}
+            try:
+                spark_bytes = await generate_sparkline(points)
+                side_effects["sparkline_png"] = spark_bytes
+                side_effects["sparkline_filename"] = f"{symbol.upper()}_{days}d_spark.png"
+            except Exception as exc:
+                log.warning("sparkline render failed for {}: {}", symbol, exc)
         return {
             "symbol": symbol.upper(),
             "coin_id": coin_id,
@@ -179,7 +280,6 @@ async def execute_tool(
             "last_price_usd": last.price,
             "change_pct": round(change_pct, 2),
             "point_count": len(points),
-            "mini_chart": _mini_chart([p.price for p in points]),
             "attribution": ATTRIBUTION,
         }
 
@@ -323,7 +423,7 @@ _GEMINI_TOOLS = genai_types.Tool(
         genai_types.FunctionDeclaration(
             name="get_chart",
             description=(
-                "Generate and send a PNG bar chart of historical prices. "
+                "Generate and send a PNG area chart of historical prices. "
                 "Call this when the user explicitly asks for a chart, graph, or plot."
             ),
             parameters=genai_types.Schema(
@@ -363,6 +463,58 @@ _GEMINI_TOOLS = genai_types.Tool(
                 required=["symbol", "days"],
             ),
         ),
+        genai_types.FunctionDeclaration(
+            name="set_user_profile",
+            description=(
+                "Save the user's display name and preferred languages so the bot can "
+                "personalize replies. Call this ONLY during onboarding, after collecting "
+                "BOTH name AND at least one language from the user."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "name": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="User's preferred display name (first name or chosen handle).",
+                    ),
+                    "languages": genai_types.Schema(
+                        type=genai_types.Type.ARRAY,
+                        items=genai_types.Schema(type=genai_types.Type.STRING),
+                        description="ISO codes (e.g. 'en','ka','ru') the user is comfortable in.",
+                    ),
+                },
+                required=["name", "languages"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_top_movers",
+            description=(
+                "Return the top N gainers or losers across the whole crypto market "
+                "over a 24h / 7d / 30d window. Call this for market-wide questions "
+                "like 'biggest losers today', 'top gainers this week', 'what's "
+                "moving?', 'ყველაზე დიდი დანაკარგი', 'лидеры падения'. Do NOT call "
+                "this when the user named a specific coin — use get_price or "
+                "get_market_chart for single-coin questions."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "direction": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="'gainers' for top up-movers, 'losers' for top down-movers.",
+                    ),
+                    "window": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Time window: '24h', '7d', or '30d'.",
+                    ),
+                    "limit": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="How many movers to return (1–20, default 10).",
+                    ),
+                },
+                required=["direction", "window"],
+            ),
+        ),
     ]
 )
 
@@ -373,41 +525,65 @@ class GeminiProvider:
         self._cg = coingecko
         self._model = model
 
-    async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
-        side_effects: dict[str, Any] = {}
+    async def chat(
+        self,
+        user_text: str,
+        on_progress: ProgressCallback | None = None,
+        uid: int | None = None,
+        user_context: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        side_effects: dict[str, Any] = {"tool_calls_made": []}
         contents: list[Any] = [
             genai_types.Content(
                 role="user",
                 parts=[genai_types.Part.from_text(text=user_text)],
             )
         ]
+        system_instruction = (
+            f"{user_context}\n\n{SYSTEM_PROMPT}" if user_context else SYSTEM_PROMPT
+        )
         config = genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_instruction,
             tools=[_GEMINI_TOOLS],
             max_output_tokens=_MAX_OUTPUT_TOKENS,
         )
 
         for _ in range(_MAX_TOOL_ITERATIONS):
-            response = await self._client.aio.models.generate_content(
+            stream = await self._client.aio.models.generate_content_stream(
                 model=self._model,
                 contents=contents,
                 config=config,
             )
+            text_parts: list[str] = []
+            fcs: list[Any] = []
+            final_content: Any = None
+            async for chunk in stream:
+                candidate = chunk.candidates[0] if chunk.candidates else None
+                if candidate is None or candidate.content is None:
+                    continue
+                final_content = candidate.content
+                for part in candidate.content.parts or []:
+                    if getattr(part, "text", None):
+                        text_parts.append(part.text)
+                        await _emit(on_progress, {"type": "text_delta", "delta": part.text})
+                    fc = getattr(part, "function_call", None)
+                    if fc is not None and getattr(fc, "name", None):
+                        fcs.append(fc)
 
-            candidate = response.candidates[0] if response.candidates else None
-            if candidate is None or candidate.content is None:
+            if final_content is None:
                 return "", side_effects
+            contents.append(final_content)
 
-            contents.append(candidate.content)
-
-            fcs = response.function_calls or []
             if not fcs:
-                return (response.text or "").strip(), side_effects
+                return "".join(text_parts).strip(), side_effects
 
             tool_response_parts: list[Any] = []
             for fc in fcs:
                 args = dict(fc.args) if fc.args else {}
-                result = await execute_tool(fc.name, args, self._cg, side_effects)
+                await _emit(on_progress, {"type": "tool_call_start", "tool": fc.name, "args": args})
+                result = await execute_tool(fc.name, args, self._cg, side_effects, uid=uid)
+                side_effects["tool_calls_made"].append({"name": fc.name, "args": args})
+                await _emit(on_progress, {"type": "tool_call_done", "tool": fc.name})
                 tool_response_parts.append(
                     genai_types.Part.from_function_response(
                         name=fc.name,
@@ -419,7 +595,7 @@ class GeminiProvider:
             )
 
         log.warning("Gemini hit max tool iterations")
-        return "I got stuck thinking about that. Could you rephrase your question?", side_effects
+        return _max_iter_text(side_effects), side_effects
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +642,7 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_chart",
         "description": (
-            "Generate and send a PNG bar chart of historical prices. "
+            "Generate and send a PNG area chart of historical prices. "
             "Call this when the user explicitly asks for a chart, graph, or plot."
         ),
         "input_schema": {
@@ -506,6 +682,57 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
             "required": ["symbol", "days"],
         },
     },
+    {
+        "name": "set_user_profile",
+        "description": (
+            "Save the user's display name and preferred languages so the bot can "
+            "personalize replies. Call this ONLY during onboarding, after collecting "
+            "BOTH name AND at least one language from the user."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "User's preferred display name (first name or chosen handle).",
+                },
+                "languages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "ISO codes (e.g. 'en','ka','ru') the user is comfortable in.",
+                },
+            },
+            "required": ["name", "languages"],
+        },
+    },
+    {
+        "name": "get_top_movers",
+        "description": (
+            "Return the top N gainers or losers across the whole crypto market "
+            "over a 24h / 7d / 30d window. Call this for market-wide questions "
+            "like 'biggest losers today', 'top gainers this week', 'what's "
+            "moving?'. Do NOT call this when the user named a specific coin — "
+            "use get_price or get_market_chart for single-coin questions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "description": "'gainers' for top up-movers, 'losers' for top down-movers.",
+                },
+                "window": {
+                    "type": "string",
+                    "description": "Time window: '24h', '7d', or '30d'.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "How many movers to return (1–20, default 10).",
+                },
+            },
+            "required": ["direction", "window"],
+        },
+    },
 ]
 
 
@@ -514,18 +741,27 @@ class ClaudeProvider:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._cg = coingecko
 
-    async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
-        side_effects: dict[str, Any] = {}
+    async def chat(
+        self,
+        user_text: str,
+        on_progress: ProgressCallback | None = None,
+        uid: int | None = None,
+        user_context: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        side_effects: dict[str, Any] = {"tool_calls_made": []}
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_text}
         ]
+        system_text = (
+            f"{user_context}\n\n{SYSTEM_PROMPT}" if user_context else SYSTEM_PROMPT
+        )
         # cache_control is forward-compat scaffolding: our system prompt is
         # currently below Haiku's ~4096-token cache minimum, so this is a no-op
         # until the prompt grows.
         system = [
             {
                 "type": "text",
-                "text": SYSTEM_PROMPT,
+                "text": system_text,
                 "cache_control": {"type": "ephemeral"},
             }
         ]
@@ -544,6 +780,8 @@ class ClaudeProvider:
                     (b.text for b in response.content if b.type == "text"),
                     "",
                 ).strip()
+                if text:
+                    await _emit(on_progress, {"type": "text_delta", "delta": text})
                 return text, side_effects
 
             if response.stop_reason != "tool_use":
@@ -559,7 +797,11 @@ class ClaudeProvider:
             tool_results: list[dict[str, Any]] = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = await execute_tool(block.name, dict(block.input), self._cg, side_effects)
+                    args = dict(block.input)
+                    await _emit(on_progress, {"type": "tool_call_start", "tool": block.name, "args": args})
+                    result = await execute_tool(block.name, args, self._cg, side_effects, uid=uid)
+                    side_effects["tool_calls_made"].append({"name": block.name, "args": args})
+                    await _emit(on_progress, {"type": "tool_call_done", "tool": block.name})
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -570,7 +812,7 @@ class ClaudeProvider:
             messages.append({"role": "user", "content": tool_results})
 
         log.warning("Claude hit max tool iterations")
-        return "I got stuck thinking about that. Could you rephrase your question?", side_effects
+        return _max_iter_text(side_effects), side_effects
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +859,7 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
     ),
     _openai_tool(
         "get_chart",
-        "Generate and send a PNG bar chart of historical prices. "
+        "Generate and send a PNG area chart of historical prices. "
         "Call this when the user explicitly asks for a chart, graph, or plot.",
         {
             "symbol": {"type": "string", "description": "Ticker or CoinGecko coin id."},
@@ -636,6 +878,47 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
         },
         ["symbol", "days"],
     ),
+    _openai_tool(
+        "set_user_profile",
+        "Save the user's display name and preferred languages so the bot can "
+        "personalize replies. Call this ONLY during onboarding, after collecting "
+        "BOTH name AND at least one language from the user.",
+        {
+            "name": {
+                "type": "string",
+                "description": "User's preferred display name (first name or chosen handle).",
+            },
+            "languages": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "ISO codes (e.g. 'en','ka','ru') the user is comfortable in.",
+            },
+        },
+        ["name", "languages"],
+    ),
+    _openai_tool(
+        "get_top_movers",
+        "Return the top N gainers or losers across the whole crypto market "
+        "over a 24h / 7d / 30d window. Call this for market-wide questions "
+        "like 'biggest losers today', 'top gainers this week', 'what's "
+        "moving?'. Do NOT call this when the user named a specific coin — "
+        "use get_price or get_market_chart for single-coin questions.",
+        {
+            "direction": {
+                "type": "string",
+                "description": "'gainers' for top up-movers, 'losers' for top down-movers.",
+            },
+            "window": {
+                "type": "string",
+                "description": "Time window: '24h', '7d', or '30d'.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "How many movers to return (1–20, default 10).",
+            },
+        },
+        ["direction", "window"],
+    ),
 ]
 
 
@@ -645,35 +928,74 @@ class OpenAIProvider:
         self._cg = coingecko
         self._model = model
 
-    async def chat(self, user_text: str) -> tuple[str, dict[str, Any]]:
-        side_effects: dict[str, Any] = {}
+    async def chat(
+        self,
+        user_text: str,
+        on_progress: ProgressCallback | None = None,
+        uid: int | None = None,
+        user_context: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        side_effects: dict[str, Any] = {"tool_calls_made": []}
+        system_content = (
+            f"{user_context}\n\n{SYSTEM_PROMPT}" if user_context else SYSTEM_PROMPT
+        )
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_text},
         ]
 
         for _ in range(_MAX_TOOL_ITERATIONS):
-            response = await self._client.chat.completions.create(
+            stream = await self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 tools=_OPENAI_TOOLS,
                 max_completion_tokens=_MAX_OUTPUT_TOKENS,
+                stream=True,
             )
-            msg = response.choices[0].message
-            tool_calls = msg.tool_calls or []
 
-            if not tool_calls:
-                return (msg.content or "").strip(), side_effects
+            content_parts: list[str] = []
+            # tool_calls accumulate across deltas, keyed by `index`
+            tc_acc: dict[int, dict[str, Any]] = {}
+            finish_reason: str | None = None
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta is None:
+                    continue
+                if delta.content:
+                    content_parts.append(delta.content)
+                    await _emit(on_progress, {"type": "text_delta", "delta": delta.content})
+                for tc_delta in (delta.tool_calls or []):
+                    slot = tc_acc.setdefault(
+                        tc_delta.index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    if tc_delta.id:
+                        slot["id"] = tc_delta.id
+                    fn = tc_delta.function
+                    if fn is not None:
+                        if fn.name:
+                            slot["name"] = fn.name
+                        if fn.arguments:
+                            slot["arguments"] += fn.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
 
+            if finish_reason != "tool_calls" or not tc_acc:
+                return "".join(content_parts).strip(), side_effects
+
+            tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
             messages.append(
                 {
                     "role": "assistant",
-                    "content": msg.content,
+                    "content": "".join(content_parts) or None,
                     "tool_calls": [
                         {
-                            "id": tc.id,
+                            "id": tc["id"],
                             "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                            "function": {"name": tc["name"], "arguments": tc["arguments"]},
                         }
                         for tc in tool_calls
                     ],
@@ -682,20 +1004,23 @@ class OpenAIProvider:
 
             for tc in tool_calls:
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(tc["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = await execute_tool(tc.function.name, args, self._cg, side_effects)
+                await _emit(on_progress, {"type": "tool_call_start", "tool": tc["name"], "args": args})
+                result = await execute_tool(tc["name"], args, self._cg, side_effects, uid=uid)
+                side_effects["tool_calls_made"].append({"name": tc["name"], "args": args})
+                await _emit(on_progress, {"type": "tool_call_done", "tool": tc["name"]})
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": tc["id"],
                         "content": json.dumps(result),
                     }
                 )
 
         log.warning("OpenAI hit max tool iterations")
-        return "I got stuck thinking about that. Could you rephrase your question?", side_effects
+        return _max_iter_text(side_effects), side_effects
 
 
 # ---------------------------------------------------------------------------
@@ -750,14 +1075,33 @@ class Agent:
             chain.append(("claude", self._claude))
         return chain
 
-    async def reply(self, user_text: str) -> AgentResult:
+    async def reply(
+        self,
+        user_text: str,
+        on_progress: ProgressCallback | None = None,
+        uid: int | None = None,
+        user_context: str | None = None,
+    ) -> AgentResult:
         side_effects: dict[str, Any] = {}
         chain = self._provider_chain(user_text)
         text: str = ""
         errors: list[str] = []
+        winning_label: str | None = None
+        winning_model: str | None = None
         for label, provider in chain:
             try:
-                text, side_effects = await provider.chat(user_text)
+                text, side_effects = await provider.chat(
+                    user_text,
+                    on_progress=on_progress,
+                    uid=uid,
+                    user_context=user_context,
+                )
+                winning_label = label
+                winning_model = getattr(provider, "_model", None) or {
+                    "gemini": _GEMINI_MODEL,
+                    "openai": _OPENAI_MODEL,
+                    "claude": _CLAUDE_MODEL,
+                }.get(label)
                 if errors:
                     log.info("{} succeeded after {} failed", label, ", ".join(errors))
                 break
@@ -781,5 +1125,10 @@ class Agent:
             chart_filename=side_effects.get("chart_filename"),
             chart_html=side_effects.get("chart_html"),
             chart_html_filename=side_effects.get("chart_html_filename"),
+            sparkline_png=side_effects.get("sparkline_png"),
+            sparkline_filename=side_effects.get("sparkline_filename"),
             chart_context=side_effects.get("chart_context"),
+            provider_used=winning_label,
+            model_used=winning_model,
+            tool_calls_made=side_effects.get("tool_calls_made") or None,
         )
