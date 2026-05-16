@@ -143,6 +143,18 @@ def _expand_follow_up(ctx: dict) -> str:
     return f"how did {ctx['symbol']} do {period}?"
 
 
+_APOLOGY_RE = re.compile(
+    r"\b(sorry|apologi[sz]e|failed|can'?t|couldn'?t|trouble|please try again|"
+    r"ბოდიში|შემიძლია|უკაცრავად|"
+    r"извини|простите|не получилось|не смог)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_apology(last_reply: str) -> bool:
+    return bool(_APOLOGY_RE.search(last_reply))
+
+
 def _yes_preamble(last_offer: str) -> str:
     return (
         f"Earlier you replied: \"{last_offer}\"\n"
@@ -483,8 +495,28 @@ async def _amain() -> None:
             # courtesy or a yes; the wrap below gives the LLM enough context
             # to decide. Stacking yes-preamble + onboarding wrap is incoherent.
             if db_user.get("onboarded") and _YES_RE.match(text):
+                # Hydrate last_reply_store from DB if the in-memory cache was
+                # wiped (bot restart). Otherwise the user's "yes" loses all
+                # context after every restart.
+                if uid not in last_reply_store:
+                    try:
+                        recent = await recent_messages(uid, limit=4)
+                        last_assistant = next(
+                            (m for m in recent if m["role"] == "assistant"),
+                            None,
+                        )
+                        if last_assistant:
+                            last_reply_store[uid] = last_assistant["content"]
+                            log.info("hydrated last_reply_store for {} from DB", uid)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("last_reply hydrate failed: {}", exc)
                 last_offer = last_reply_store.get(uid, "")
-                if last_offer and wants_chart(last_offer):
+                # Skip yes-handling if the last reply was an apology/failure
+                # message — a courteous "yes/კარგი/да" acknowledges, doesn't
+                # request retry. Otherwise we loop on transient failures.
+                if last_offer and _looks_like_apology(last_offer):
+                    log.info("skipped yes-expand for {}: last reply was apology", uid)
+                elif last_offer and wants_chart(last_offer):
                     follow_up_store.pop(uid, None)
                     text = _yes_preamble(last_offer)
                     log.info("expanded yes via last_reply (chart intent) for {}", uid)
@@ -595,6 +627,24 @@ async def _amain() -> None:
                     bio_cmp,
                     reply_to=event.id,
                     force_document=False,
+                )
+            if result.summary_stack_html:
+                bio_stack_html = io.BytesIO(result.summary_stack_html)
+                bio_stack_html.name = result.summary_stack_html_filename or "summary_stack.html"
+                await client.send_file(
+                    event.chat_id,
+                    bio_stack_html,
+                    reply_to=event.id,
+                    force_document=True,
+                )
+            if result.summary_comparison_html:
+                bio_cmp_html = io.BytesIO(result.summary_comparison_html)
+                bio_cmp_html.name = result.summary_comparison_html_filename or "summary_comparison.html"
+                await client.send_file(
+                    event.chat_id,
+                    bio_cmp_html,
+                    reply_to=event.id,
+                    force_document=True,
                 )
             # Fire-and-forget message logging — never block the reply path
             asyncio.create_task(log_message(uid, "user", original_text))

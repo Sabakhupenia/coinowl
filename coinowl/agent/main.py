@@ -90,6 +90,10 @@ class AgentResult:
     summary_stack_filename: str | None = field(default=None)
     summary_comparison_png: bytes | None = field(default=None)
     summary_comparison_filename: str | None = field(default=None)
+    summary_stack_html: bytes | None = field(default=None)
+    summary_stack_html_filename: str | None = field(default=None)
+    summary_comparison_html: bytes | None = field(default=None)
+    summary_comparison_html_filename: str | None = field(default=None)
     chart_context: dict | None = field(default=None)  # {"symbol": str, "days": int}
     provider_used: str | None = field(default=None)   # 'openai' | 'gemini' | 'claude'
     model_used: str | None = field(default=None)
@@ -229,6 +233,7 @@ async def execute_tool(
             window = "7d"
         days_map = {"24h": 1, "7d": 7, "30d": 30}
         days = days_map[window]
+        want_html = bool(args.get("html") or False)
         from coinowl.db import users as db_users
         try:
             wl = await db_users.get_watchlist(uid)
@@ -284,10 +289,22 @@ async def execute_tool(
             from coinowl.charts.plotly_chart import (
                 generate_summary_stack,
                 generate_summary_comparison,
+                generate_summary_stack_html,
+                generate_summary_comparison_html,
             )
-            stack_bytes, comp_bytes = await _asyncio.gather(
+            render_tasks = [
                 generate_summary_stack(rows, window_label),
                 generate_summary_comparison(rows, window_label),
+            ]
+            if want_html:
+                render_tasks.extend([
+                    generate_summary_stack_html(rows, window_label),
+                    generate_summary_comparison_html(rows, window_label),
+                ])
+            renders = await _asyncio.gather(*render_tasks)
+            stack_bytes, comp_bytes = renders[0], renders[1]
+            stack_html_bytes, comp_html_bytes = (
+                (renders[2], renders[3]) if want_html else (None, None)
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("summary chart render failed: {}", exc)
@@ -303,10 +320,17 @@ async def execute_tool(
             side_effects["summary_stack_filename"] = f"watchlist_{window}_stack.png"
             side_effects["summary_comparison_png"] = comp_bytes
             side_effects["summary_comparison_filename"] = f"watchlist_{window}_comparison.png"
+            if stack_html_bytes is not None:
+                side_effects["summary_stack_html"] = stack_html_bytes
+                side_effects["summary_stack_html_filename"] = f"watchlist_{window}_stack.html"
+            if comp_html_bytes is not None:
+                side_effects["summary_comparison_html"] = comp_html_bytes
+                side_effects["summary_comparison_html_filename"] = f"watchlist_{window}_comparison.html"
 
         return {
             "window": window,
             "coins": coin_payload,
+            "html_delivered": want_html,
             "attribution": ATTRIBUTION,
         }
 
@@ -709,12 +733,17 @@ _GEMINI_TOOLS = genai_types.Tool(
         genai_types.FunctionDeclaration(
             name="get_market_summary",
             description=(
-                "Fetch prices, % changes, AND deliver two composite PNG charts (vertical "
+                "Fetch prices, % changes, AND deliver composite charts (vertical "
                 "stack of mini area charts + normalized comparison overlay) for the "
                 "user's watchlist. Call this when the user asks 'how's my market', "
                 "'summary please', 'how are my coins', 'ჩემი მონეტები', 'мой портфель', "
                 "etc. Pick window from user phrasing: 'today' → 24h, 'this week' → 7d, "
-                "'this month' → 30d. Default 7d."
+                "'this month' → 30d. Default 7d. "
+                "Set html=true when the user explicitly asks for interactive / HTML "
+                "summary charts ('html version of summary', 'interactive summary'); "
+                "the bot will deliver BOTH PNG and HTML versions of both summary "
+                "charts. Default html=false (PNG only). Do NOT call get_chart_html "
+                "for summary HTML — that's for single-coin charts only."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -722,6 +751,10 @@ _GEMINI_TOOLS = genai_types.Tool(
                     "window": genai_types.Schema(
                         type=genai_types.Type.STRING,
                         description="Time window: '24h', '7d', or '30d'. Default '7d'.",
+                    ),
+                    "html": genai_types.Schema(
+                        type=genai_types.Type.BOOLEAN,
+                        description="If true, also deliver interactive HTML versions of both summary charts. Default false (PNG only).",
                     ),
                 },
                 required=[],
@@ -1009,8 +1042,11 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_market_summary",
         "description": (
-            "Fetch prices + 2 composite PNG charts (vertical stack + normalized "
-            "comparison) for the user's watchlist. Window: '24h', '7d' (default), '30d'."
+            "Fetch prices + composite charts (vertical stack + normalized comparison) "
+            "for the user's watchlist. Window: '24h', '7d' (default), '30d'. Set "
+            "html=true when the user asks for interactive/HTML summary charts (the "
+            "bot will deliver both PNG and HTML versions). Do NOT use get_chart_html "
+            "for summary HTML — that's single-coin only."
         ),
         "input_schema": {
             "type": "object",
@@ -1018,6 +1054,10 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
                 "window": {
                     "type": "string",
                     "description": "Time window: '24h', '7d', or '30d'. Default '7d'.",
+                },
+                "html": {
+                    "type": "boolean",
+                    "description": "If true, also deliver interactive HTML versions of both summary charts. Default false.",
                 },
             },
         },
@@ -1265,12 +1305,18 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
     ),
     _openai_tool(
         "get_market_summary",
-        "Fetch prices + 2 composite PNG charts (vertical stack + normalized "
-        "comparison) for the user's watchlist. Window: '24h', '7d' (default), '30d'.",
+        "Fetch prices + composite charts (vertical stack + normalized comparison) "
+        "for the user's watchlist. Window: '24h', '7d' (default), '30d'. Set "
+        "html=true when the user asks for interactive/HTML summary charts (bot "
+        "delivers both PNG and HTML). Do NOT use get_chart_html for summary HTML.",
         {
             "window": {
                 "type": "string",
                 "description": "Time window: '24h', '7d', or '30d'. Default '7d'.",
+            },
+            "html": {
+                "type": "boolean",
+                "description": "If true, also deliver interactive HTML versions of both summary charts. Default false.",
             },
         },
         [],
@@ -1527,6 +1573,10 @@ class Agent:
             summary_stack_filename=side_effects.get("summary_stack_filename"),
             summary_comparison_png=side_effects.get("summary_comparison_png"),
             summary_comparison_filename=side_effects.get("summary_comparison_filename"),
+            summary_stack_html=side_effects.get("summary_stack_html"),
+            summary_stack_html_filename=side_effects.get("summary_stack_html_filename"),
+            summary_comparison_html=side_effects.get("summary_comparison_html"),
+            summary_comparison_html_filename=side_effects.get("summary_comparison_html_filename"),
             chart_context=side_effects.get("chart_context"),
             provider_used=winning_label,
             model_used=winning_model,

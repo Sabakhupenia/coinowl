@@ -199,11 +199,14 @@ def _build_summary_stack(
             range=[ymin, ymax],
             nticks=3,
         )
-        # Symbol label anchored to subplot's paper position
+        # Symbol label anchored to subplot's paper position. Plotly's first
+        # subplot xref/yref is bare 'x'/'y' (no digit); subsequent rows get x2,
+        # y2, x3, y3, etc. Passing 'x1 domain' raises an enum-validation error.
+        axis_n = "" if i == 1 else str(i)
         fig.add_annotation(
             text=f"<b>{symbol}</b>",
-            xref=f"x{i} domain",
-            yref=f"y{i} domain",
+            xref=f"x{axis_n} domain",
+            yref=f"y{axis_n} domain",
             x=0.01,
             y=0.95,
             showarrow=False,
@@ -315,9 +318,57 @@ async def generate_summary_comparison(
     return await asyncio.to_thread(_render_png, fig)
 
 
+async def generate_summary_stack_html(
+    rows: list[tuple[str, list[PricePoint]]],
+    window_label: str,
+) -> bytes:
+    """Return UTF-8 bytes of an interactive HTML version of the summary stack."""
+    fig = _build_summary_stack(rows, window_label)
+    return await asyncio.to_thread(_render_html, fig)
+
+
+async def generate_summary_comparison_html(
+    rows: list[tuple[str, list[PricePoint]]],
+    window_label: str,
+) -> bytes:
+    """Return UTF-8 bytes of an interactive HTML version of the comparison overlay."""
+    fig = _build_summary_comparison(rows, window_label)
+    return await asyncio.to_thread(_render_html, fig)
+
+
 def _render_png(fig: go.Figure) -> bytes:
     return fig.to_image(format="png")
 
 
+_RESPONSIVE_CSS = (
+    "<style>"
+    "html,body{margin:0;padding:0;background:#0a0a1a;}"
+    "body{min-height:100vh;}"
+    "div.plotly-graph-div{width:100vw!important;min-height:100vh!important;}"
+    "</style>"
+)
+
+
 def _render_html(fig: go.Figure) -> bytes:
-    return fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
+    """Render figure as a self-contained, mobile- and desktop-responsive HTML.
+
+    Strips the figure's fixed `width`/`height` and enables `autosize=True` so
+    Plotly's SVG actually scales to fill the container (the CSS below sizes the
+    container to the viewport). Without this, the chart renders at its
+    original 800×N pixels and sits in the top-left of a black expanse on big
+    screens.
+
+    For tall stack charts on small screens, the body is allowed to overflow
+    vertically (body min-height: 100vh, no overflow:hidden) so the user can
+    scroll on mobile.
+    """
+    fig.update_layout(width=None, height=None, autosize=True)
+    html = fig.to_html(
+        include_plotlyjs="cdn",
+        full_html=True,
+        default_width="100%",
+        default_height="100vh",
+        config={"responsive": True, "displaylogo": False},
+    )
+    html = html.replace("</head>", f"{_RESPONSIVE_CSS}</head>", 1)
+    return html.encode("utf-8")
