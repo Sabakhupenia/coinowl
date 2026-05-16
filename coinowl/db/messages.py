@@ -54,6 +54,56 @@ def _vector_literal(values: list[float] | None) -> str | None:
     return "[" + ",".join(f"{v:.7f}" for v in values) + "]"
 
 
+async def recent_messages(user_id: int, limit: int = 6) -> list[dict[str, Any]]:
+    """Return the user's last `limit` chat turns (newest first), as dicts with
+    role, content, ts. Cheap timestamp-ordered SQL — no embedding needed."""
+    rows = await pool().fetch(
+        """
+        SELECT role, content, ts
+          FROM messages
+         WHERE user_id = $1
+         ORDER BY ts DESC
+         LIMIT $2
+        """,
+        user_id,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def semantic_recall(
+    user_id: int,
+    query: str,
+    *,
+    k: int = 3,
+) -> list[dict[str, Any]]:
+    """Vector-similarity search over the user's past messages. Embeds the
+    query via Gemini, then orders by pgvector cosine distance. Returns
+    matching rows with a similarity score in [0, 1]."""
+    emb = await embed_text(query)
+    if emb is None:
+        return []
+    emb_lit = _vector_literal(emb)
+    try:
+        rows = await pool().fetch(
+            """
+            SELECT role, content, ts,
+                   1 - (embedding <=> $2::vector) AS similarity
+              FROM messages
+             WHERE user_id = $1 AND embedding IS NOT NULL
+             ORDER BY embedding <=> $2::vector
+             LIMIT $3
+            """,
+            user_id,
+            emb_lit,
+            k,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("semantic_recall query failed: {}", exc)
+        return []
+    return [dict(r) for r in rows]
+
+
 async def log_message(
     user_id: int,
     role: str,

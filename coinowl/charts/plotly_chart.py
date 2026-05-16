@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 if TYPE_CHECKING:
     from coinowl.data.coingecko import PricePoint
@@ -149,6 +150,168 @@ async def generate_chart_html(
 async def generate_sparkline(points: list[PricePoint]) -> bytes:
     """Return PNG bytes for a 200x40 inline sparkline (no axes, transparent bg)."""
     fig = _build_sparkline(points)
+    return await asyncio.to_thread(_render_png, fig)
+
+
+_COMPARISON_PALETTE = [
+    _GOLD, _COPPER, "#8B7355", "#7A6128", _CREAM,
+    "#A0826D", "#5A4A2E", "#D4AF37", "#C04A2A", "#8B7355",
+]
+
+
+def _build_summary_stack(
+    rows: list[tuple[str, list[PricePoint]]],
+    window_label: str,
+) -> go.Figure:
+    n = len(rows)
+    fig = make_subplots(
+        rows=n,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.04,
+    )
+    for i, (symbol, points) in enumerate(rows, start=1):
+        times = [p.timestamp for p in points]
+        prices = [p.price for p in points]
+        ymin, ymax = _yrange(prices) if prices else (0.0, 1.0)
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=prices,
+                mode="lines",
+                line=dict(color=_GOLD, width=1.6),
+                fill="tozeroy",
+                fillcolor=_GOLD_FILL,
+                hovertemplate=f"{symbol}<br>%{{x|%b %d}}<br>$%{{y:,.2f}}<extra></extra>",
+                showlegend=False,
+            ),
+            row=i,
+            col=1,
+        )
+        fig.update_xaxes(row=i, col=1, showgrid=False, color=_CREAM, showticklabels=(i == n))
+        fig.update_yaxes(
+            row=i,
+            col=1,
+            showgrid=True,
+            gridcolor=_GRID,
+            color=_CREAM,
+            tickprefix="$",
+            range=[ymin, ymax],
+            nticks=3,
+        )
+        # Symbol label anchored to subplot's paper position
+        fig.add_annotation(
+            text=f"<b>{symbol}</b>",
+            xref=f"x{i} domain",
+            yref=f"y{i} domain",
+            x=0.01,
+            y=0.95,
+            showarrow=False,
+            font=dict(color=_GOLD, size=13, family="monospace"),
+            row=i,
+            col=1,
+        )
+
+    fig.update_layout(
+        title=dict(text=f"{window_label} watchlist summary (USD)", font=dict(size=14, color=_CREAM)),
+        paper_bgcolor=_BG_PAPER,
+        plot_bgcolor=_BG_PLOT,
+        font=dict(color=_CREAM, family="monospace"),
+        margin=dict(l=60, r=20, t=50, b=40),
+        width=800,
+        height=120 * n + 40,
+    )
+    logo_uri = _load_logo_uri()
+    if logo_uri is not None:
+        fig.update_layout(
+            images=[dict(
+                source=logo_uri,
+                xref="paper", yref="paper",
+                x=0.99, y=0.01,
+                sizex=0.10, sizey=0.10,
+                xanchor="right", yanchor="bottom",
+                opacity=0.30,
+                layer="above",
+            )]
+        )
+    return fig
+
+
+def _build_summary_comparison(
+    rows: list[tuple[str, list[PricePoint]]],
+    window_label: str,
+) -> go.Figure:
+    fig = go.Figure()
+    for i, (symbol, points) in enumerate(rows):
+        if not points:
+            continue
+        first = points[0].price
+        if first <= 0:
+            continue
+        pct = [(p.price / first - 1) * 100 for p in points]
+        times = [p.timestamp for p in points]
+        color = _COMPARISON_PALETTE[i % len(_COMPARISON_PALETTE)]
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=pct,
+                mode="lines",
+                name=symbol,
+                line=dict(color=color, width=2),
+                hovertemplate=f"{symbol}<br>%{{x|%b %d}}<br>%{{y:+.2f}}%%<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title=dict(text=f"{window_label} watchlist — normalized % change", font=dict(size=14, color=_CREAM)),
+        paper_bgcolor=_BG_PAPER,
+        plot_bgcolor=_BG_PLOT,
+        font=dict(color=_CREAM, family="monospace"),
+        xaxis=dict(showgrid=False, color=_CREAM),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor=_GRID,
+            color=_CREAM,
+            tickformat=".1f",
+            ticksuffix="%",
+            zeroline=True,
+            zerolinecolor=_GRID,
+        ),
+        legend=dict(font=dict(color=_CREAM), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=60, r=20, t=50, b=40),
+        width=800,
+        height=400,
+    )
+    logo_uri = _load_logo_uri()
+    if logo_uri is not None:
+        fig.update_layout(
+            images=[dict(
+                source=logo_uri,
+                xref="paper", yref="paper",
+                x=0.99, y=0.04,
+                sizex=0.14, sizey=0.22,
+                xanchor="right", yanchor="bottom",
+                opacity=0.35,
+                layer="above",
+            )]
+        )
+    return fig
+
+
+async def generate_summary_stack(
+    rows: list[tuple[str, list[PricePoint]]],
+    window_label: str,
+) -> bytes:
+    """Return PNG bytes for a vertical stack of mini area charts (one per coin)."""
+    fig = _build_summary_stack(rows, window_label)
+    return await asyncio.to_thread(_render_png, fig)
+
+
+async def generate_summary_comparison(
+    rows: list[tuple[str, list[PricePoint]]],
+    window_label: str,
+) -> bytes:
+    """Return PNG bytes for a normalized % change overlay across all coins."""
+    fig = _build_summary_comparison(rows, window_label)
     return await asyncio.to_thread(_render_png, fig)
 
 

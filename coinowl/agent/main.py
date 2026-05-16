@@ -86,6 +86,10 @@ class AgentResult:
     chart_html_filename: str | None = field(default=None)
     sparkline_png: bytes | None = field(default=None)
     sparkline_filename: str | None = field(default=None)
+    summary_stack_png: bytes | None = field(default=None)
+    summary_stack_filename: str | None = field(default=None)
+    summary_comparison_png: bytes | None = field(default=None)
+    summary_comparison_filename: str | None = field(default=None)
     chart_context: dict | None = field(default=None)  # {"symbol": str, "days": int}
     provider_used: str | None = field(default=None)   # 'openai' | 'gemini' | 'claude'
     model_used: str | None = field(default=None)
@@ -151,15 +155,191 @@ async def execute_tool(
         if not isinstance(langs, list):
             langs = [str(langs)]
         langs = [str(lang).strip().lower() for lang in langs if str(lang).strip()]
-        if not name or not langs:
-            return {"error": "Both 'name' and at least one language are required"}
+        raw_coins = args.get("coins") or []
+        if not isinstance(raw_coins, list):
+            raw_coins = [str(raw_coins)]
+        coins = [str(c).strip().upper() for c in raw_coins if str(c).strip()]
+        coins = list(dict.fromkeys(coins))  # dedupe, preserve order
+        if not name or not langs or not coins:
+            return {"error": "All three required: name, at least one language, and at least one coin."}
         from coinowl.db import users as db_users
+        for sym in coins:
+            try:
+                resolve(sym)
+            except Exception:
+                return {"error": f"Unknown ticker: {sym!r}. Use BTC, ETH, SOL, etc."}
+        if len(coins) > db_users.WATCHLIST_MAX:
+            return {"error": f"Watchlist capped at {db_users.WATCHLIST_MAX} coins; pick up to {db_users.WATCHLIST_MAX}."}
         try:
-            await db_users.set_profile(uid, display_name=name, preferred_languages=langs)
+            await db_users.set_profile(
+                uid,
+                display_name=name,
+                preferred_languages=langs,
+                coins=coins,
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("set_user_profile DB write failed: {}", exc)
             return {"error": "Could not save profile; try again"}
-        return {"profile_set": True, "name": name, "languages": langs}
+        return {"profile_set": True, "name": name, "languages": langs, "coins": coins}
+
+    if tool_name == "update_watchlist":
+        if uid is None:
+            return {"error": "Internal: uid not available for update_watchlist"}
+        raw_syms = args.get("symbols") or []
+        if not isinstance(raw_syms, list):
+            raw_syms = [str(raw_syms)]
+        symbols = [str(s).strip().upper() for s in raw_syms if str(s).strip()]
+        mode = str(args.get("mode", "replace")).strip().lower()
+        if mode not in ("replace", "add", "remove"):
+            return {"error": "Argument 'mode' must be 'replace', 'add', or 'remove'"}
+        if not symbols:
+            return {"error": "At least one symbol is required"}
+        from coinowl.db import users as db_users
+        if mode != "remove":
+            for sym in symbols:
+                try:
+                    resolve(sym)
+                except Exception:
+                    return {"error": f"Unknown ticker: {sym!r}. Use BTC, ETH, SOL, etc."}
+        try:
+            result = await db_users.update_watchlist(uid, symbols=symbols, mode=mode)
+        except db_users.WatchlistTooLarge as exc:
+            return {"error": str(exc) + f". Cap is {db_users.WATCHLIST_MAX}. Remove some first."}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("update_watchlist DB write failed: {}", exc)
+            return {"error": "Could not update watchlist; try again"}
+        return {"watchlist": result, "mode": mode, "count": len(result)}
+
+    if tool_name == "get_watchlist":
+        if uid is None:
+            return {"error": "Internal: uid not available for get_watchlist"}
+        from coinowl.db import users as db_users
+        try:
+            wl = await db_users.get_watchlist(uid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_watchlist DB read failed: {}", exc)
+            return {"error": "Could not read watchlist; try again"}
+        return {"watchlist": wl, "count": len(wl)}
+
+    if tool_name == "get_market_summary":
+        if uid is None:
+            return {"error": "Internal: uid not available for get_market_summary"}
+        window = str(args.get("window", "7d")).strip().lower()
+        if window not in ("24h", "7d", "30d"):
+            window = "7d"
+        days_map = {"24h": 1, "7d": 7, "30d": 30}
+        days = days_map[window]
+        from coinowl.db import users as db_users
+        try:
+            wl = await db_users.get_watchlist(uid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_market_summary watchlist read failed: {}", exc)
+            return {"error": "Could not read your watchlist; try again"}
+        if not wl:
+            return {"error": "Your watchlist is empty — add coins first with 'add BTC and ETH to my watchlist'."}
+
+        import asyncio as _asyncio
+        sem = _asyncio.Semaphore(2)
+
+        async def fetch(sym: str):
+            coin_id = resolve(sym)
+            async with sem:
+                try:
+                    points = await cg.get_market_chart(coin_id, days=days)
+                    return (sym, points, None)
+                except CoinGeckoRateLimitError:
+                    return (sym, [], "rate_limited")
+                except CoinGeckoUnknownCoinError:
+                    return (sym, [], "unknown")
+                except CoinGeckoError as exc:
+                    log.warning("summary fetch {} failed: {}", sym, exc)
+                    return (sym, [], "failed")
+
+        fetched = await _asyncio.gather(*(fetch(s) for s in wl))
+        rows: list[tuple[str, list[Any]]] = []
+        coin_payload: list[dict[str, Any]] = []
+        for sym, points, err in fetched:
+            if err or not points:
+                coin_payload.append({"symbol": sym, "error": err or "no_data"})
+                continue
+            first, last = points[0], points[-1]
+            change_pct = (last.price - first.price) / first.price * 100 if first.price else 0.0
+            coin_payload.append({
+                "symbol": sym,
+                "price_usd": round(last.price, 4),
+                "change_pct": round(change_pct, 2),
+            })
+            rows.append((sym, points))
+
+        if not rows:
+            return {
+                "window": window,
+                "coins": coin_payload,
+                "error": "Could not fetch chart data for any of your coins",
+                "attribution": ATTRIBUTION,
+            }
+
+        window_label = {"24h": "24-hour", "7d": "7-day", "30d": "30-day"}[window]
+        try:
+            from coinowl.charts.plotly_chart import (
+                generate_summary_stack,
+                generate_summary_comparison,
+            )
+            stack_bytes, comp_bytes = await _asyncio.gather(
+                generate_summary_stack(rows, window_label),
+                generate_summary_comparison(rows, window_label),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("summary chart render failed: {}", exc)
+            return {
+                "window": window,
+                "coins": coin_payload,
+                "error": "Chart render failed",
+                "attribution": ATTRIBUTION,
+            }
+
+        if side_effects is not None:
+            side_effects["summary_stack_png"] = stack_bytes
+            side_effects["summary_stack_filename"] = f"watchlist_{window}_stack.png"
+            side_effects["summary_comparison_png"] = comp_bytes
+            side_effects["summary_comparison_filename"] = f"watchlist_{window}_comparison.png"
+
+        return {
+            "window": window,
+            "coins": coin_payload,
+            "attribution": ATTRIBUTION,
+        }
+
+    if tool_name == "recall_past_conversations":
+        if uid is None:
+            return {"error": "Internal: uid not available for recall_past_conversations"}
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return {"error": "Argument 'query' is required"}
+        try:
+            k = int(args.get("k", 3))
+        except (TypeError, ValueError):
+            k = 3
+        k = max(1, min(5, k))
+        from coinowl.db.messages import semantic_recall
+        try:
+            matches = await semantic_recall(uid, query, k=k)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("recall_past_conversations failed: {}", exc)
+            return {"error": "Could not search past conversations; try again"}
+        return {
+            "query": query,
+            "matches": [
+                {
+                    "role": m["role"],
+                    "content": m["content"],
+                    "ts": m["ts"].isoformat() if m.get("ts") else None,
+                    "similarity": round(float(m.get("similarity") or 0.0), 3),
+                }
+                for m in matches
+            ],
+            "count": len(matches),
+        }
 
     if tool_name == "get_top_movers":
         direction = str(args.get("direction", "")).strip().lower()
@@ -466,9 +646,10 @@ _GEMINI_TOOLS = genai_types.Tool(
         genai_types.FunctionDeclaration(
             name="set_user_profile",
             description=(
-                "Save the user's display name and preferred languages so the bot can "
-                "personalize replies. Call this ONLY during onboarding, after collecting "
-                "BOTH name AND at least one language from the user."
+                "Save the user's display name, preferred languages, AND initial coin "
+                "watchlist so the bot can personalize replies and generate summaries. "
+                "Call this ONLY during onboarding, after collecting ALL THREE: name, "
+                "at least one language, and at least one coin (max 10) from the user."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -482,8 +663,96 @@ _GEMINI_TOOLS = genai_types.Tool(
                         items=genai_types.Schema(type=genai_types.Type.STRING),
                         description="ISO codes (e.g. 'en','ka','ru') the user is comfortable in.",
                     ),
+                    "coins": genai_types.Schema(
+                        type=genai_types.Type.ARRAY,
+                        items=genai_types.Schema(type=genai_types.Type.STRING),
+                        description="Uppercase tickers (e.g. ['BTC','ETH','SOL']) the user wants on their watchlist. 1-10 coins.",
+                    ),
                 },
-                required=["name", "languages"],
+                required=["name", "languages", "coins"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="update_watchlist",
+            description=(
+                "Mutate the user's coin watchlist. Use mode='add' for 'add X to my "
+                "watchlist', mode='remove' for 'drop X / remove X', mode='replace' for "
+                "'set my watchlist to X Y Z'. Tickers must be uppercase. Cap is 10 coins."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "symbols": genai_types.Schema(
+                        type=genai_types.Type.ARRAY,
+                        items=genai_types.Schema(type=genai_types.Type.STRING),
+                        description="Uppercase tickers to add/remove/replace with.",
+                    ),
+                    "mode": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="'add', 'remove', or 'replace'.",
+                    ),
+                },
+                required=["symbols", "mode"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_watchlist",
+            description=(
+                "Return the user's current coin watchlist. Call this when the user "
+                "asks 'what's on my watchlist', 'what coins do I follow', etc."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={},
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_market_summary",
+            description=(
+                "Fetch prices, % changes, AND deliver two composite PNG charts (vertical "
+                "stack of mini area charts + normalized comparison overlay) for the "
+                "user's watchlist. Call this when the user asks 'how's my market', "
+                "'summary please', 'how are my coins', 'ჩემი მონეტები', 'мой портфель', "
+                "etc. Pick window from user phrasing: 'today' → 24h, 'this week' → 7d, "
+                "'this month' → 30d. Default 7d."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "window": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Time window: '24h', '7d', or '30d'. Default '7d'.",
+                    ),
+                },
+                required=[],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="recall_past_conversations",
+            description=(
+                "Search the user's OWN past chat history (across all sessions) by "
+                "semantic similarity to a query. Use this ONLY when the user references "
+                "something OLDER than the recent conversation block already in your "
+                "system instruction — for example: 'remember when we talked about "
+                "staking last week?', 'what coin did I ask about a few days ago?', "
+                "'show me the chart you made for me before'. The RECENT CONVERSATION "
+                "block covers the last few turns automatically; only call this for "
+                "older recall. Returns the top-K most semantically similar past "
+                "messages."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "query": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="What you want to search for in the user's past conversations.",
+                    ),
+                    "k": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="How many matches to return (1-5, default 3).",
+                    ),
+                },
+                required=["query"],
             ),
         ),
         genai_types.FunctionDeclaration(
@@ -685,9 +954,9 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "set_user_profile",
         "description": (
-            "Save the user's display name and preferred languages so the bot can "
-            "personalize replies. Call this ONLY during onboarding, after collecting "
-            "BOTH name AND at least one language from the user."
+            "Save the user's display name, preferred languages, AND initial coin "
+            "watchlist. Call this ONLY during onboarding, after collecting ALL THREE: "
+            "name, at least one language, and at least one coin (max 10) from the user."
         ),
         "input_schema": {
             "type": "object",
@@ -701,8 +970,78 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
                     "items": {"type": "string"},
                     "description": "ISO codes (e.g. 'en','ka','ru') the user is comfortable in.",
                 },
+                "coins": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Uppercase tickers (e.g. ['BTC','ETH','SOL']) — 1 to 10.",
+                },
             },
-            "required": ["name", "languages"],
+            "required": ["name", "languages", "coins"],
+        },
+    },
+    {
+        "name": "update_watchlist",
+        "description": (
+            "Mutate the user's coin watchlist. mode='add' / 'remove' / 'replace'. "
+            "Uppercase tickers. Cap is 10 coins."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Uppercase tickers to add/remove/replace with.",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "'add', 'remove', or 'replace'.",
+                },
+            },
+            "required": ["symbols", "mode"],
+        },
+    },
+    {
+        "name": "get_watchlist",
+        "description": "Return the user's current coin watchlist.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_market_summary",
+        "description": (
+            "Fetch prices + 2 composite PNG charts (vertical stack + normalized "
+            "comparison) for the user's watchlist. Window: '24h', '7d' (default), '30d'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "window": {
+                    "type": "string",
+                    "description": "Time window: '24h', '7d', or '30d'. Default '7d'.",
+                },
+            },
+        },
+    },
+    {
+        "name": "recall_past_conversations",
+        "description": (
+            "Search the user's own past chat history by semantic similarity. Use ONLY "
+            "for references older than the RECENT CONVERSATION block already in your "
+            "system instruction. Returns the top-K most similar past messages."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for in the user's past conversations.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "How many matches to return (1-5, default 3).",
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -880,9 +1219,9 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
     ),
     _openai_tool(
         "set_user_profile",
-        "Save the user's display name and preferred languages so the bot can "
-        "personalize replies. Call this ONLY during onboarding, after collecting "
-        "BOTH name AND at least one language from the user.",
+        "Save the user's display name, preferred languages, AND initial coin watchlist. "
+        "Call this ONLY during onboarding, after collecting ALL THREE: name, at least "
+        "one language, and at least one coin (max 10) from the user.",
         {
             "name": {
                 "type": "string",
@@ -893,8 +1232,65 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
                 "items": {"type": "string"},
                 "description": "ISO codes (e.g. 'en','ka','ru') the user is comfortable in.",
             },
+            "coins": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Uppercase tickers (e.g. ['BTC','ETH','SOL']) — 1 to 10.",
+            },
         },
-        ["name", "languages"],
+        ["name", "languages", "coins"],
+    ),
+    _openai_tool(
+        "update_watchlist",
+        "Mutate the user's coin watchlist. mode='add' / 'remove' / 'replace'. "
+        "Uppercase tickers. Cap is 10 coins.",
+        {
+            "symbols": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Uppercase tickers to add/remove/replace with.",
+            },
+            "mode": {
+                "type": "string",
+                "description": "'add', 'remove', or 'replace'.",
+            },
+        },
+        ["symbols", "mode"],
+    ),
+    _openai_tool(
+        "get_watchlist",
+        "Return the user's current coin watchlist.",
+        {},
+        [],
+    ),
+    _openai_tool(
+        "get_market_summary",
+        "Fetch prices + 2 composite PNG charts (vertical stack + normalized "
+        "comparison) for the user's watchlist. Window: '24h', '7d' (default), '30d'.",
+        {
+            "window": {
+                "type": "string",
+                "description": "Time window: '24h', '7d', or '30d'. Default '7d'.",
+            },
+        },
+        [],
+    ),
+    _openai_tool(
+        "recall_past_conversations",
+        "Search the user's own past chat history by semantic similarity. Use ONLY "
+        "for references older than the RECENT CONVERSATION block already in your "
+        "system instruction. Returns the top-K most similar past messages.",
+        {
+            "query": {
+                "type": "string",
+                "description": "What to search for in the user's past conversations.",
+            },
+            "k": {
+                "type": "integer",
+                "description": "How many matches to return (1-5, default 3).",
+            },
+        },
+        ["query"],
     ),
     _openai_tool(
         "get_top_movers",
@@ -1127,6 +1523,10 @@ class Agent:
             chart_html_filename=side_effects.get("chart_html_filename"),
             sparkline_png=side_effects.get("sparkline_png"),
             sparkline_filename=side_effects.get("sparkline_filename"),
+            summary_stack_png=side_effects.get("summary_stack_png"),
+            summary_stack_filename=side_effects.get("summary_stack_filename"),
+            summary_comparison_png=side_effects.get("summary_comparison_png"),
+            summary_comparison_filename=side_effects.get("summary_comparison_filename"),
             chart_context=side_effects.get("chart_context"),
             provider_used=winning_label,
             model_used=winning_model,

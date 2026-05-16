@@ -55,7 +55,9 @@ main.py
                                      otherwise      → OpenAI → Gemini → Claude
               └── execute_tool()   dispatches get_price / get_market_chart /
                                    get_top_movers / get_chart / get_chart_html /
-                                   set_user_profile
+                                   set_user_profile / update_watchlist /
+                                   get_watchlist / get_market_summary /
+                                   recall_past_conversations
                     ├── coinowl/data/coingecko.py        async HTTP, TTL cache
                     ├── coinowl/data/symbols.py          ticker → CoinGecko ID
                     └── coinowl/charts/plotly_chart.py   bar PNG via kaleido,
@@ -170,6 +172,12 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **CoinGecko free tier** is ~5 req/min in practice, much tighter than documented 10-50 req/min. TTL cache handles typical traffic; set `COINGECKO_API_KEY` (demo plan) for anything beyond casual testing.
 
+- **`get_market_summary` issues one fetch per watchlist coin** (capped at 10 by `WATCHLIST_MAX`) and serializes via `asyncio.Semaphore(2)` to stay under free-tier rate limits. First-time summaries take ~5-10s; subsequent fetches inside the 300s `MARKET_CHART_TTL_SEC` are instant.
+
+- **Onboarding now collects three fields** (name + languages + ≥1 coin). The `onboarded` flag is computed in SQL from `display_name`, `preferred_languages`, `watched_coins` — if any is missing, the bot re-enters the onboarding loop on the next message. Reset via `DELETE FROM users WHERE user_id = <uid>` if a row is wedged.
+
+- **Conversation memory is two-tier.** Tier 1 (always-on, no embedding cost): the chat handler injects the user's last 6 turns from the `messages` table into the system instruction as a `## RECENT CONVERSATION` block — that's how "yes" handling survives bot restart. Tier 2 (on-demand, one embedding call): the LLM calls `recall_past_conversations(query)` when it needs to recall something older than the recent block. Don't add Tier-2 retrieval to every turn — defeats the cost argument.
+
 - **Quota resets on restart.** `QuotaTracker` is in-memory. A bot restart lets users bypass the 3-hour window. Acceptable for now; Postgres persistence is v2.
 
 - **`ANTHROPIC_API_KEY` is optional.** Disabled silently if unset (logged at INFO). The remaining chain (OpenAI ↔ Gemini) still works.
@@ -193,6 +201,9 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - `/price`, `/start`, `/help`, `/version`, `/disclaimer` commands
 - `get_price` and `get_market_chart` LLM tools
 - `get_top_movers` tool → top N gainers/losers across the whole market in 24h/7d/30d, via CoinGecko `/coins/markets`. Handles "biggest losers today", "top gainers this week" style questions in EN/KA/RU
+- Per-user **watchlist** (capped at 10 coins) collected during onboarding alongside name + languages; mutated via `update_watchlist(symbols, mode='add'|'remove'|'replace')`; readable via `get_watchlist`
+- `get_market_summary(window)` tool → prices + percent changes + **two composite PNG charts** (vertical stack of mini area charts, one per coin + normalized %-change comparison overlay) for the user's watchlist. Window auto-picked by LLM (24h/7d/30d) from user phrasing
+- **Conversation memory (RAG)**: every chat turn is logged + embedded; the bot injects the user's last 6 turns into the system context for free on every reply (survives bot restart). For older recall, the LLM can call `recall_past_conversations(query)` which embeds the query and runs pgvector cosine search over the user's full chat history
 - `get_chart` tool → Plotly **area** chart PNG (y-axis zoomed to actual price range, not anchored at $0) sent inline as Telegram photo (named `SYM_Nd.png`)
 - `get_chart_html` tool → interactive Plotly HTML sent as Telegram document; offered after every PNG chart, only generated when user confirms
 - 200×40 inline **sparkline PNG** auto-attached to every stats reply (replaces the old 🟩🟥 emoji-square mini-chart)
@@ -203,9 +214,8 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - loguru structured logging to stderr + `logs/coinowl.log` in Tbilisi time
 
 **Placeholder / not started:**
-- Watchlist + onboarding watchlist tools + market summaries (v0.7.1)
-- Price alerts (v0.7.2)
-- Daily digest scheduler (v0.7.3)
+- Price alerts (v0.7.3)
+- Daily digest scheduler (v0.7.4)
 - News fetcher + `knowledge_chunks` RAG (CoinDesk RSS source decided; subsystem unbuilt)
 - `coins` table + `/similar` tool (needs CoinGecko coin-detail bootstrap)
 - Server-side cache of generated charts (re-renders identical chart/HTML on every call today)
@@ -215,13 +225,12 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 ## Roadmap
 
-1. **v0.7.1 — Watchlist + market summaries:** new tools (`set_watchlist`, `get_watchlist`, `get_market_summary`), composite summary charts (vertical stack + normalized comparison overlay), watchlist onboarding step (extends the existing name+language onboarding).
-2. **v0.7.2 — Price alerts:** `alerts` table, user-configured polling intervals (5m / 30m / 1h / daily / custom), background watcher task that wakes per-alert, Telegram push on threshold cross. Example user-flow: "tell me when BTC reaches $80k or drops below $75k" → bot stores two alerts → watcher pings user when either threshold crosses. Survives bot restart (state lives in Postgres).
-3. **v0.7.3 — Daily digest:** per-user schedule, auto-pushed market summary at configured hour.
-4. **News RAG:** CoinDesk RSS → `knowledge_chunks` with Gemini embeddings → grounded "why did X drop?" answers.
-5. **`/similar` tool:** bootstrap `coins` table from CoinGecko coin-detail endpoints + embed; vector similarity search.
-6. **Chart render cache:** key by `(symbol, days, kind)`; skip kaleido on repeats.
-7. **Test suite + CI:** unit tests for guardrail regex, `wants_chart`, `resolve()`, yes-expansion, quota math. GitHub Actions for import smoke + lint.
+1. **v0.7.3 — Price alerts:** `alerts` table, user-configured polling intervals (5m / 30m / 1h / daily / custom), background watcher task that wakes per-alert, Telegram push on threshold cross. Example user-flow: "tell me when BTC reaches $80k or drops below $75k" → bot stores two alerts → watcher pings user when either threshold crosses. Survives bot restart (state lives in Postgres).
+2. **v0.7.4 — Daily digest:** per-user schedule, auto-pushed market summary at configured hour (reuses v0.7.1 summary tooling + v0.7.3 push channel).
+3. **News RAG:** CoinDesk RSS → `knowledge_chunks` with Gemini embeddings → grounded "why did X drop?" answers.
+4. **`/similar` tool:** bootstrap `coins` table from CoinGecko coin-detail endpoints + embed; vector similarity search.
+5. **Chart render cache:** key by `(symbol, days, kind)`; skip kaleido on repeats.
+6. **Test suite + CI:** unit tests for guardrail regex, `wants_chart`, `resolve()`, yes-expansion, quota math. GitHub Actions for import smoke + lint.
 
 ---
 

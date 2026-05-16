@@ -32,7 +32,7 @@ from coinowl.core.logging import get_logger
 from coinowl.db import close_db, init_db
 from coinowl.db import quota as db_quota
 from coinowl.db import users as db_users
-from coinowl.db.messages import _init_embedding_client, log_message
+from coinowl.db.messages import _init_embedding_client, log_message, recent_messages
 from coinowl.data.coingecko import (
     ATTRIBUTION,
     CoinGeckoClient,
@@ -282,16 +282,41 @@ def _is_not_command(event: events.NewMessage.Event) -> bool:
     return not (event.raw_text or "").startswith("/")
 
 
+def _recent_conversation_block(turns: list[dict]) -> str | None:
+    """Format the user's last N chat turns (newest-last) as system context.
+
+    Returned in chronological order so the LLM reads them as a conversation
+    flowing forward. The current user message isn't logged yet so it won't
+    appear here — only prior turns.
+    """
+    if not turns:
+        return None
+    # turns come newest-first from DAO; flip to chronological
+    ordered = list(reversed(turns))
+    lines = ["## RECENT CONVERSATION (oldest → newest)"]
+    for t in ordered:
+        role = t["role"]
+        # Trim each line so we don't blow the system-prompt budget on a long reply
+        body = (t["content"] or "").strip().replace("\n", " ")
+        if len(body) > 400:
+            body = body[:400] + "…"
+        lines.append(f"- {role}: {body}")
+    return "\n".join(lines)
+
+
 def _user_context_block(db_user: dict, *, remaining: int) -> str | None:
     if not db_user.get("onboarded") or not db_user.get("display_name"):
         return None
     langs = ", ".join(db_user.get("preferred_languages") or ["en"])
+    watched = db_user.get("watched_coins") or []
     parts = [
         "## CURRENT USER",
         f"Name: {db_user['display_name']}",
         f"Preferred languages: {langs}",
         f"Quota: {remaining} of 10 messages remaining in the current 3-hour rolling window.",
     ]
+    if watched:
+        parts.append(f"Watchlist: {', '.join(watched)}")
     if remaining == 0:
         parts.append(
             "THIS IS THE USER'S LAST MESSAGE in the current window. Do NOT add a "
@@ -325,17 +350,20 @@ def _onboarding_wrap(
         f"This user is being onboarded. Their latest message: \"{original_text}\"."
         f"{history_block}\n"
         "\n"
-        "Your task: collect TWO pieces of info before doing anything else —\n"
+        "Your task: collect THREE pieces of info before doing anything else —\n"
         "  (1) preferred display name to call them by\n"
         "  (2) at least one language they want the bot to use (en, ka, ru, …)\n"
+        "  (3) which crypto coins they want on their watchlist (uppercase tickers "
+        "like BTC, ETH, SOL — up to 10)\n"
         "\n"
         "PROGRESS TRACKING — IMPORTANT:\n"
-        "Read the conversation above. If the user has ALREADY given their name "
-        "in any earlier message, remember it. If they've already named "
-        "language(s), remember those. Ask ONLY for whichever piece is still "
-        "missing — do not re-ask for both. When reminding them about a missing "
-        "field, lead with the ⚠️ emoji, e.g. \"⚠️ I still need your name — what "
-        "should I call you?\" or \"⚠️ Which language(s) should I use with you?\".\n"
+        "Read the conversation above. If the user has ALREADY given their name, "
+        "language(s), or coin list in any earlier message, REMEMBER those values. "
+        "Ask ONLY for whichever piece is still missing — do not re-ask for ones "
+        "already provided. When reminding them about a missing field, lead with "
+        "the ⚠️ emoji: \"⚠️ I still need your name — what should I call you?\" / "
+        "\"⚠️ Which language(s) should I use?\" / \"⚠️ Which coins do you want to "
+        "track? (e.g. BTC, ETH, SOL — up to 10).\"\n"
         "\n"
         "LANGUAGE RULE — STRICT: write your reply ENTIRELY in the language of "
         "the latest message above. If it's in Georgian (ქართული alphabet, e.g. "
@@ -343,9 +371,15 @@ def _onboarding_wrap(
         "for Russian (Cyrillic). Do NOT mix English explanations into a "
         "non-English reply. Only technical tokens like 'BTC', 'ETH' stay as-is.\n"
         "\n"
-        "When you have BOTH name AND at least one language from the "
-        "conversation, call set_user_profile and confirm warmly. Until then, "
-        "do NOT call set_user_profile and do NOT call any other tools.\n"
+        "When you have ALL THREE (name, at least one language, at least one coin), "
+        "call set_user_profile(name=..., languages=[...], coins=[...]) and confirm "
+        "warmly. In that same confirmation reply, ALSO briefly mention:\n"
+        "  • the 10-message / 3-hour-window quota\n"
+        "  • that they can chat naturally about crypto (this bot is AI-chat-first),\n"
+        "    and that /help, /disclaimer, /price, /version commands exist for "
+        "    users who prefer them.\n"
+        "Until ALL THREE are collected, do NOT call set_user_profile and do NOT "
+        "call any other tools.\n"
         "</onboarding>"
     )
 
@@ -473,7 +507,23 @@ async def _amain() -> None:
                 user_context = None
             else:
                 onboarding_history.pop(uid, None)  # cleanup if user is already onboarded
-                user_context = _user_context_block(db_user, remaining=remaining)
+                # Fetch the last 6 chat turns from DB and prepend as system context.
+                # Cheap (no embedding); the LLM gets recent conversation memory for
+                # free, surviving bot restart. For older recall, the LLM can call
+                # the recall_past_conversations tool which uses vector search.
+                try:
+                    recent = await recent_messages(uid, limit=6)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("recent_messages fetch failed: {}", exc)
+                    recent = []
+                blocks = [
+                    block for block in (
+                        _recent_conversation_block(recent),
+                        _user_context_block(db_user, remaining=remaining),
+                    )
+                    if block
+                ]
+                user_context = "\n\n".join(blocks) if blocks else None
             streaming = StreamingReply(event, client)
             await streaming.start()
             result: AgentResult = await agent.reply(
@@ -527,6 +577,24 @@ async def _amain() -> None:
                     bio_html,
                     reply_to=event.id,
                     force_document=True,
+                )
+            if result.summary_stack_png:
+                bio_sum = io.BytesIO(result.summary_stack_png)
+                bio_sum.name = result.summary_stack_filename or "summary_stack.png"
+                await client.send_file(
+                    event.chat_id,
+                    bio_sum,
+                    reply_to=event.id,
+                    force_document=False,
+                )
+            if result.summary_comparison_png:
+                bio_cmp = io.BytesIO(result.summary_comparison_png)
+                bio_cmp.name = result.summary_comparison_filename or "summary_comparison.png"
+                await client.send_file(
+                    event.chat_id,
+                    bio_cmp,
+                    reply_to=event.id,
+                    force_document=False,
                 )
             # Fire-and-forget message logging — never block the reply path
             asyncio.create_task(log_message(uid, "user", original_text))
