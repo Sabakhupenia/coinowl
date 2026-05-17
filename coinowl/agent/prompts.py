@@ -315,6 +315,14 @@ GUARDRAIL_REFUSAL = (
 )
 
 
+OFFTOPIC_REFUSAL = (
+    "🦉 I'm a crypto stats bot — I can only help with prices, market data, "
+    "charts, your watchlist, and alerts. For other topics (code, recipes, "
+    "medical, general life questions), try a general-purpose assistant. "
+    "Run /help to see what I can do, or ask me something like \"what's BTC at?\"."
+)
+
+
 PROVIDER_FAILED = (
     "🦉 I'm having trouble thinking right now. Try again in a moment."
 )

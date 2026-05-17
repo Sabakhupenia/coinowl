@@ -29,9 +29,11 @@ from google.genai import types as genai_types
 
 from coinowl.agent.prompts import (
     GUARDRAIL_REFUSAL,
+    OFFTOPIC_REFUSAL,
     PROVIDER_FAILED,
     SYSTEM_PROMPT,
 )
+from coinowl.agent.safety import TopicClassifier, passes_offtopic_regex
 from coinowl.core.logging import get_logger
 from coinowl.data.coingecko import (
     ATTRIBUTION,
@@ -2079,6 +2081,12 @@ class Agent:
             if anthropic_api_key
             else None
         )
+        self._classifier = TopicClassifier(
+            openai_api_key=openai_api_key,
+            gemini_api_key=gemini_api_key,
+            openai_model=openai_model,
+            gemini_model=gemini_model,
+        )
         log.info("Gemini model: {}", gemini_model)
         if self._openai is not None:
             log.info("OpenAI model: {} (primary for non-chart queries)", openai_model)
@@ -2147,6 +2155,26 @@ class Agent:
         if not passes_guardrail(text):
             log.warning("Guardrail tripped on model output: {!r}", text[:200])
             return AgentResult(text=GUARDRAIL_REFUSAL)
+
+        # Off-topic safety: Layer 1 (regex) is cheap + deterministic; Layer 2
+        # (LLM-as-judge) catches what the regex misses. Both swap in
+        # OFFTOPIC_REFUSAL on hit. Emergency-safety redirects are explicitly
+        # allowed by both layers (see coinowl/agent/safety.py).
+        if not passes_offtopic_regex(text):
+            log.warning(
+                "Off-topic regex tripped on model output: {!r}", text[:200]
+            )
+            return AgentResult(text=OFFTOPIC_REFUSAL)
+        try:
+            on_topic = await self._classifier.is_on_topic(text)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("topic classifier raised: {}; failing open", exc)
+            on_topic = True
+        if not on_topic:
+            log.warning(
+                "Topic classifier flagged OFF_TOPIC on output: {!r}", text[:200]
+            )
+            return AgentResult(text=OFFTOPIC_REFUSAL)
 
         return AgentResult(
             text=text,
