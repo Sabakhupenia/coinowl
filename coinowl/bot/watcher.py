@@ -152,23 +152,101 @@ class BackgroundWatcher:
                 continue
             if next_fire > now:
                 continue
-            try:
-                await db_notifs.enqueue(
-                    user_id=sched["user_id"],
-                    schedule_id=sched["id"],
-                    payload={
-                        "fired_at": now.isoformat(),
-                        "tool_name": sched["tool_name"],
-                        "tool_args": sched["tool_args_json"],
-                    },
-                )
-                await db_sched.mark_schedule_fired(sched["id"])
-                log.info(
-                    "enqueued schedule {} for user {} (tool={})",
-                    sched["id"], sched["user_id"], sched["tool_name"],
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("schedule enqueue failed for {}: {}", sched["id"], exc)
+            mode = sched.get("delivery_mode") or "push"
+            if mode == "push":
+                await self._fire_schedule_push(sched)
+            else:
+                await self._enqueue_schedule_deferred(sched, now=now)
+
+    async def _fire_schedule_push(self, sched: dict[str, Any]) -> None:
+        """Real-time-push delivery: re-execute tool, personality-wrap, send."""
+        side_effects: dict[str, Any] = {}
+        try:
+            result = await execute_tool(
+                sched["tool_name"],
+                dict(sched["tool_args_json"] or {}),
+                self._cg,
+                side_effects,
+                uid=sched["user_id"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "schedule {} tool exec failed: {}", sched["id"], exc
+            )
+            return
+        try:
+            opener = await self._personality.compose_schedule_opener(
+                original_phrasing=sched["original_phrasing"],
+                tool_name=sched["tool_name"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("schedule personality wrap failed: {}", exc)
+            opener = "🦉 Your scheduled summary is ready."
+        body_block = _format_scheduled_result(
+            sched["tool_name"], result, sched["original_phrasing"]
+        )
+        text = f"{opener}\n\n{body_block}\n\nData: CoinGecko (https://www.coingecko.com)"
+        try:
+            await self._client.send_message(sched["user_id"], text, parse_mode=None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("schedule push failed for user {}: {}", sched["user_id"], exc)
+            return
+        for png_key, name_key in (
+            ("chart_png", "chart_filename"),
+            ("sparkline_png", "sparkline_filename"),
+            ("summary_stack_png", "summary_stack_filename"),
+            ("summary_comparison_png", "summary_comparison_filename"),
+        ):
+            data = side_effects.get(png_key)
+            if data:
+                bio = io.BytesIO(data)
+                bio.name = side_effects.get(name_key) or f"{png_key}.png"
+                try:
+                    await self._client.send_file(sched["user_id"], bio, force_document=False)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("schedule png send failed ({}): {}", name_key, exc)
+        for html_key, name_key in (
+            ("chart_html", "chart_html_filename"),
+            ("summary_stack_html", "summary_stack_html_filename"),
+            ("summary_comparison_html", "summary_comparison_html_filename"),
+        ):
+            data = side_effects.get(html_key)
+            if data:
+                bio = io.BytesIO(data)
+                bio.name = side_effects.get(name_key) or f"{html_key}.html"
+                try:
+                    await self._client.send_file(sched["user_id"], bio, force_document=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("schedule html send failed ({}): {}", name_key, exc)
+        try:
+            await db_sched.mark_schedule_fired(sched["id"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mark_schedule_fired failed for {}: {}", sched["id"], exc)
+        log.info(
+            "pushed schedule {} for user {} (tool={})",
+            sched["id"], sched["user_id"], sched["tool_name"],
+        )
+
+    async def _enqueue_schedule_deferred(
+        self, sched: dict[str, Any], *, now: datetime
+    ) -> None:
+        try:
+            await db_notifs.enqueue(
+                user_id=sched["user_id"],
+                schedule_id=sched["id"],
+                payload={
+                    "fired_at": now.isoformat(),
+                    "tool_name": sched["tool_name"],
+                    "tool_args": sched["tool_args_json"],
+                },
+            )
+            await db_sched.mark_schedule_fired(sched["id"])
+            log.info(
+                "enqueued (deferred) schedule {} for user {} (tool={})",
+                sched["id"], sched["user_id"], sched["tool_name"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("schedule enqueue failed for {}: {}", sched["id"], exc)
 
 
 # ---------------------------------------------------------------------------

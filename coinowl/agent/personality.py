@@ -77,6 +77,28 @@ class PersonalityWrapper:
             return opener
         return self._fallback_alert(symbol=symbol, direction=direction)
 
+    async def compose_schedule_opener(
+        self,
+        *,
+        original_phrasing: str,
+        tool_name: str,
+    ) -> str:
+        """Real-time-push opener for a single scheduled summary that just fired.
+
+        Different vibe from compose_batch_opener — the user didn't just open
+        the chat, they got an unprompted notification. Acknowledge that.
+        """
+        prompt = (
+            f"The user previously said: \"{original_phrasing}\".\n"
+            f"Their scheduled check (tool: {tool_name}) just fired and the bot "
+            f"is sending it to them right now as a notification. Write a warm "
+            f"opener acknowledging the scheduled delivery."
+        )
+        opener = await self._generate(prompt)
+        if opener:
+            return opener
+        return "🦉 Your scheduled summary is ready."
+
     async def compose_batch_opener(self, items: list[dict]) -> str:
         """`items` is a list of {"original_phrasing": str, "tool_name": str,
         "fired_at": isoformat-string}. The opener should acknowledge that the

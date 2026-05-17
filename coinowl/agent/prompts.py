@@ -203,8 +203,21 @@ PRICE ALERTS — pushed in real-time when a threshold crosses:
 - cancel_price_alert: "cancel my BTC alert", "remove that alert". If the user
   isn't specific about WHICH alert, call list_price_alerts first and ask.
 
-SCHEDULED SUMMARY PUSHES — fired on a cron schedule, delivered the NEXT time
-the user messages (not real-time — they wait politely for engagement):
+SCHEDULED SUMMARY PUSHES — fire on a cron schedule. Two delivery modes:
+  • 'push' — sent to Telegram as a notification when the schedule fires
+  • 'deferred' — saved and delivered as a prefix on the user's NEXT message
+
+DELIVERY MODE IS PICKED BY THE USER VIA BUTTONS. Do NOT pass delivery_mode
+yourself unless the user was unambiguously explicit in their original
+message ("PUSH me my watchlist", "JUST SAVE my top movers as history"). For
+normal phrasing like "send me X every Monday", call schedule_push WITHOUT
+delivery_mode — the bot will send the user two inline buttons (🔔 Notify /
+📋 Save for next visit) after your reply, and they tap one. After
+schedule_push returns with status='needs_delivery_mode', write a brief one-
+line confirmation (e.g. "Got it — every Sunday at 9am UTC, watchlist
+summary. How should I deliver it?") in the user's language. Do NOT describe
+the modes in your text — the button labels speak for themselves.
+
 - schedule_push: use when the user says "send me my watchlist every Monday
   morning", "daily top movers please", "weekly BTC chart at 9am", "ყოველ
   ორშაბათ", "каждый понедельник утром". Translate cadence to 5-field cron

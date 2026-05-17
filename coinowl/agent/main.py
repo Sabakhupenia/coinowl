@@ -95,6 +95,7 @@ class AgentResult:
     summary_comparison_html: bytes | None = field(default=None)
     summary_comparison_html_filename: str | None = field(default=None)
     chart_context: dict | None = field(default=None)  # {"symbol": str, "days": int}
+    schedule_proposal: dict | None = field(default=None)  # delivery-mode-decision-pending
     provider_used: str | None = field(default=None)   # 'openai' | 'gemini' | 'claude'
     model_used: str | None = field(default=None)
     tool_calls_made: list[dict[str, Any]] | None = field(default=None)
@@ -133,6 +134,18 @@ _SCHEDULABLE_TOOLS = frozenset({
     "get_top_movers",
     "get_market_summary",
 })
+
+# Required keys in `tool_args` for each schedulable tool. Validating at
+# schedule_push time means the LLM gets a clear error and retries with proper
+# args; otherwise the watcher would just produce a useless error at fire time.
+_SCHEDULE_REQUIRED_TOOL_ARGS = {
+    "get_price": ["symbol"],
+    "get_market_chart": ["symbol", "days"],
+    "get_chart": ["symbol", "days"],
+    "get_chart_html": ["symbol", "days"],
+    "get_top_movers": ["direction", "window"],
+    "get_market_summary": [],  # all-optional
+}
 
 
 def _max_iter_text(side_effects: dict[str, Any]) -> str:
@@ -484,28 +497,72 @@ async def execute_tool(
         tool_args = args.get("tool_args") or {}
         if not isinstance(tool_args, dict):
             return {"error": "Argument 'tool_args' must be an object/dict"}
+        required = _SCHEDULE_REQUIRED_TOOL_ARGS.get(target_tool, [])
+        missing = [k for k in required if k not in tool_args or tool_args[k] in (None, "")]
+        if missing:
+            return {
+                "error": (
+                    f"tool_args for {target_tool} is missing required keys: "
+                    f"{', '.join(missing)}. Examples — get_top_movers needs "
+                    "{'direction':'gainers'|'losers','window':'24h'|'7d'|'30d'}, "
+                    "get_chart needs {'symbol':'BTC','days':7}, etc. Retry the "
+                    "schedule_push call with complete tool_args."
+                )
+            }
+        delivery_mode_raw = args.get("delivery_mode")
+        delivery_mode: str | None
+        if delivery_mode_raw is None or str(delivery_mode_raw).strip() == "":
+            delivery_mode = None
+        else:
+            delivery_mode = str(delivery_mode_raw).strip().lower()
+            if delivery_mode not in ("push", "deferred"):
+                return {"error": "Argument 'delivery_mode' must be 'push' or 'deferred'"}
         original_phrasing = str(args.get("original_phrasing", "")).strip()
         if not original_phrasing:
             return {"error": "Argument 'original_phrasing' is required (the user's own words)"}
-        from coinowl.db import schedules as db_sched
-        try:
-            row = await db_sched.create_schedule(
-                user_id=uid,
-                cron_expr=cron_expr,
-                tool_name=target_tool,
-                tool_args=tool_args,
-                original_phrasing=original_phrasing,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("schedule_push DB write failed: {}", exc)
-            return {"error": "Could not save the schedule; try again"}
         from datetime import datetime, timezone
         next_fire = croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+
+        # If the user (or the LLM, on an unambiguous request) already picked a
+        # mode, write the row now. Otherwise stage the proposal in side_effects;
+        # the bot will offer inline buttons and the callback handler creates
+        # the row once the user taps.
+        if delivery_mode is not None:
+            from coinowl.db import schedules as db_sched
+            try:
+                row = await db_sched.create_schedule(
+                    user_id=uid,
+                    cron_expr=cron_expr,
+                    tool_name=target_tool,
+                    tool_args=tool_args,
+                    original_phrasing=original_phrasing,
+                    delivery_mode=delivery_mode,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("schedule_push DB write failed: {}", exc)
+                return {"error": "Could not save the schedule; try again"}
+            return {
+                "schedule_id": row["id"],
+                "status": "created",
+                "cron_expr": row["cron_expr"],
+                "tool_name": row["tool_name"],
+                "tool_args": row["tool_args_json"],
+                "delivery_mode": row["delivery_mode"],
+                "next_fire_utc": next_fire.isoformat(),
+            }
+
+        if side_effects is not None:
+            side_effects["schedule_proposal"] = {
+                "user_id": uid,
+                "cron_expr": cron_expr,
+                "tool_name": target_tool,
+                "tool_args": tool_args,
+                "original_phrasing": original_phrasing,
+            }
         return {
-            "schedule_id": row["id"],
-            "cron_expr": row["cron_expr"],
-            "tool_name": row["tool_name"],
-            "tool_args": row["tool_args_json"],
+            "status": "needs_delivery_mode",
+            "cron_expr": cron_expr,
+            "tool_name": target_tool,
             "next_fire_utc": next_fire.isoformat(),
         }
 
@@ -525,6 +582,7 @@ async def execute_tool(
                     "cron_expr": r["cron_expr"],
                     "tool_name": r["tool_name"],
                     "tool_args": r["tool_args_json"],
+                    "delivery_mode": r.get("delivery_mode") or "push",
                     "original_phrasing": r["original_phrasing"],
                 }
                 for r in rows
@@ -1072,19 +1130,23 @@ _GEMINI_TOOLS = genai_types.Tool(
         genai_types.FunctionDeclaration(
             name="schedule_push",
             description=(
-                "Schedule a recurring summary push. The bot fires the given tool on "
-                "the cron schedule and delivers the result the next time the user "
-                "messages (not in real-time — scheduled summaries wait for "
-                "engagement). Use for 'send me my watchlist every Monday morning', "
-                "'daily top movers please', 'weekly BTC chart'. Map natural-language "
-                "cadence to 5-field cron: 'every Monday 9am' → '0 9 * * 1'; "
-                "'every day at 8am' → '0 8 * * *'; 'every Sunday evening' → "
-                "'0 18 * * 0'; 'first of every month' → '0 9 1 * *'. Times are UTC. "
-                "tool_name must be one of: get_market_summary, get_top_movers, "
-                "get_price, get_market_chart, get_chart, get_chart_html. tool_args "
-                "is whatever args that tool needs (e.g. {'window':'7d'} for "
-                "get_market_summary, {'symbol':'BTC','days':7} for get_chart). "
-                "original_phrasing MUST be the user's own words verbatim."
+                "Schedule a recurring summary delivery. Two delivery modes: "
+                "'push' (default) sends the result to the user's Telegram in "
+                "real-time when the schedule fires — matches 'send me X every "
+                "Monday', 'notify me', 'ping me'. 'deferred' enqueues the "
+                "result so it's delivered as a prefix the NEXT time the user "
+                "messages — matches 'have my watchlist ready next time we "
+                "chat', 'save it for our next conversation'. Default to 'push' "
+                "unless the user clearly asked for the wait-for-me behavior. "
+                "Map natural-language cadence to 5-field cron (UTC): 'every "
+                "Monday 9am' → '0 9 * * 1'; 'every day at 8am' → '0 8 * * *'; "
+                "'every Sunday evening' → '0 18 * * 0'; 'first of every month' "
+                "→ '0 9 1 * *'. tool_name must be one of: get_market_summary, "
+                "get_top_movers, get_price, get_market_chart, get_chart, "
+                "get_chart_html. tool_args MUST include all required args for "
+                "that tool (get_top_movers needs direction + window, get_chart "
+                "needs symbol + days, etc.). original_phrasing MUST be the "
+                "user's own words verbatim."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -1099,7 +1161,11 @@ _GEMINI_TOOLS = genai_types.Tool(
                     ),
                     "tool_args": genai_types.Schema(
                         type=genai_types.Type.OBJECT,
-                        description="Args object passed to the scheduled tool.",
+                        description="Args object passed to the scheduled tool. Must include all required args for the target tool.",
+                    ),
+                    "delivery_mode": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="'push' (default — send to Telegram immediately when schedule fires) or 'deferred' (save for next user message).",
                     ),
                     "original_phrasing": genai_types.Schema(
                         type=genai_types.Type.STRING,
@@ -1476,12 +1542,17 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "schedule_push",
         "description": (
-            "Schedule a recurring tool fire whose result is delivered the next "
-            "time the user messages. Use for 'every Monday morning send my "
-            "watchlist'. Map cadence to 5-field cron (UTC). tool_name must be "
-            "one of: get_market_summary, get_top_movers, get_price, "
-            "get_market_chart, get_chart, get_chart_html. tool_args is the dict "
-            "passed to that tool. original_phrasing MUST be user's own words."
+            "Schedule a recurring summary. delivery_mode='push' (default) sends "
+            "the result to Telegram in real-time when the schedule fires — "
+            "matches 'send me X every Monday'. delivery_mode='deferred' saves "
+            "it for the user's next message — matches 'have it ready next time "
+            "we chat'. Default 'push' unless the user clearly asked to wait. "
+            "Map cadence to 5-field cron (UTC). tool_name must be one of: "
+            "get_market_summary, get_top_movers, get_price, get_market_chart, "
+            "get_chart, get_chart_html. tool_args MUST include all required "
+            "args for that tool (get_top_movers needs direction + window, "
+            "get_chart needs symbol + days). original_phrasing MUST be user's "
+            "own words verbatim."
         ),
         "input_schema": {
             "type": "object",
@@ -1496,7 +1567,11 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
                 },
                 "tool_args": {
                     "type": "object",
-                    "description": "Args dict for the scheduled tool.",
+                    "description": "Args dict for the scheduled tool (must include all required args).",
+                },
+                "delivery_mode": {
+                    "type": "string",
+                    "description": "'push' (default) or 'deferred'.",
                 },
                 "original_phrasing": {
                     "type": "string",
@@ -1803,11 +1878,16 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
     ),
     _openai_tool(
         "schedule_push",
-        "Schedule a recurring tool fire delivered the next time the user messages. "
-        "Use for 'every Monday morning send my watchlist'. Map cadence to 5-field "
-        "cron (UTC). tool_name must be one of: get_market_summary, get_top_movers, "
-        "get_price, get_market_chart, get_chart, get_chart_html. tool_args is the "
-        "dict passed to that tool. original_phrasing MUST be user's own words.",
+        "Schedule a recurring summary. delivery_mode='push' (default) sends the "
+        "result to Telegram in real-time when the schedule fires — matches 'send "
+        "me X every Monday'. delivery_mode='deferred' saves it for the user's "
+        "next message — matches 'have it ready next time we chat'. Default 'push' "
+        "unless the user clearly asked to wait. Map cadence to 5-field cron (UTC). "
+        "tool_name must be one of: get_market_summary, get_top_movers, get_price, "
+        "get_market_chart, get_chart, get_chart_html. tool_args MUST include all "
+        "required args for that tool (get_top_movers needs direction + window, "
+        "get_chart needs symbol + days). original_phrasing MUST be user's own "
+        "words verbatim.",
         {
             "cron_expr": {
                 "type": "string",
@@ -1819,7 +1899,11 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
             },
             "tool_args": {
                 "type": "object",
-                "description": "Args dict for the scheduled tool.",
+                "description": "Args dict for the scheduled tool (must include all required args).",
+            },
+            "delivery_mode": {
+                "type": "string",
+                "description": "'push' (default) or 'deferred'.",
             },
             "original_phrasing": {
                 "type": "string",
@@ -2062,6 +2146,7 @@ class Agent:
             summary_comparison_html=side_effects.get("summary_comparison_html"),
             summary_comparison_html_filename=side_effects.get("summary_comparison_html_filename"),
             chart_context=side_effects.get("chart_context"),
+            schedule_proposal=side_effects.get("schedule_proposal"),
             provider_used=winning_label,
             model_used=winning_model,
             tool_calls_made=side_effects.get("tool_calls_made") or None,

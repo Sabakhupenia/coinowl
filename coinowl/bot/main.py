@@ -21,7 +21,10 @@ from typing import Any
 def _esc(s: str) -> str:
     return _html.escape(s or "", quote=False)
 
-from telethon import TelegramClient, events
+import secrets
+import time as _time
+
+from telethon import Button, TelegramClient, events
 from telethon.errors import MessageNotModifiedError
 from telethon.sessions import StringSession
 
@@ -437,6 +440,17 @@ async def _amain() -> None:
         # once the user becomes onboarded. Lets the LLM remember partial info
         # across onboarding turns (e.g. user gave language but not name yet).
         onboarding_history: dict[int, list[str]] = {}
+        # Staging area for proposed schedules awaiting the user's delivery-mode
+        # tap. Cleared on bot restart (acceptable — users tap within seconds).
+        # Each entry: {created_at, user_id, cron_expr, tool_name, tool_args,
+        # original_phrasing}. 1h TTL prunes stale proposals.
+        pending_schedules: dict[str, dict[str, Any]] = {}
+
+        def _prune_pending_schedules() -> None:
+            cutoff = _time.time() - 3600
+            stale = [k for k, v in pending_schedules.items() if v["created_at"] < cutoff]
+            for k in stale:
+                pending_schedules.pop(k, None)
 
         @client.on(events.NewMessage(pattern=r"^/start(?:\s|$|@)"))
         async def start(event: events.NewMessage.Event) -> None:
@@ -453,6 +467,65 @@ async def _amain() -> None:
         @client.on(events.NewMessage(pattern=r"^/disclaimer(?:\s|$|@)"))
         async def disclaimer(event: events.NewMessage.Event) -> None:
             await event.reply(_DISCLAIMER_TEXT)
+
+        @client.on(events.CallbackQuery(pattern=rb"^sched:"))
+        async def schedule_mode_callback(event: events.CallbackQuery.Event) -> None:
+            try:
+                _, mode_short, token = event.data.decode().split(":", 2)
+            except (UnicodeDecodeError, ValueError):
+                await event.answer("Invalid button.", alert=False)
+                return
+            mode = {"push": "push", "def": "deferred"}.get(mode_short)
+            if mode is None:
+                await event.answer("Invalid button.", alert=False)
+                return
+            params = pending_schedules.pop(token, None)
+            if params is None:
+                await event.answer("This proposal expired. Ask again.", alert=True)
+                try:
+                    await event.edit("⏳ (proposal expired — message me the schedule again)")
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            if params["user_id"] != event.sender_id:
+                await event.answer("Not yours.", alert=True)
+                return
+            from coinowl.db import schedules as db_sched
+            try:
+                row = await db_sched.create_schedule(
+                    user_id=params["user_id"],
+                    cron_expr=params["cron_expr"],
+                    tool_name=params["tool_name"],
+                    tool_args=params["tool_args"],
+                    original_phrasing=params["original_phrasing"],
+                    delivery_mode=mode,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("schedule create from button failed: {}", exc)
+                await event.answer("Couldn't save — try again.", alert=True)
+                return
+            from croniter import croniter as _croniter
+            from datetime import datetime as _dt, timezone as _tz
+            try:
+                next_fire = _croniter(row["cron_expr"], _dt.now(_tz.utc)).get_next(_dt)
+                next_str = next_fire.strftime("%Y-%m-%d %H:%M UTC")
+            except Exception:  # noqa: BLE001
+                next_str = "(soon)"
+            mode_label = "🔔 notification" if mode == "push" else "📋 history (next visit)"
+            await event.answer("Saved.", alert=False)
+            try:
+                await event.edit(
+                    f"✅ Scheduled as {mode_label}\n"
+                    f"Next run: {next_str}",
+                    buttons=None,
+                    parse_mode=None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("schedule confirmation edit failed: {}", exc)
+            log.info(
+                "schedule {} created from button (user={}, mode={}, tool={})",
+                row["id"], params["user_id"], mode, params["tool_name"],
+            )
 
         @client.on(events.NewMessage(pattern=r"^/price(?:\s+(\S+))?(?:\s|$|@)"))
         async def price(event: events.NewMessage.Event) -> None:
@@ -680,6 +753,30 @@ async def _amain() -> None:
                     reply_to=event.id,
                     force_document=True,
                 )
+            # If the agent staged a schedule proposal, surface inline buttons so
+            # the user picks delivery mode with one tap. The schedule row isn't
+            # written to DB until they click one.
+            if result.schedule_proposal:
+                _prune_pending_schedules()
+                token = secrets.token_urlsafe(8)
+                pending_schedules[token] = {
+                    "created_at": _time.time(),
+                    **result.schedule_proposal,
+                }
+                try:
+                    await client.send_message(
+                        event.chat_id,
+                        "Pick how to deliver this:",
+                        buttons=[
+                            [Button.inline("🔔 Notify me when it fires", f"sched:push:{token}".encode())],
+                            [Button.inline("📋 Save for next visit",       f"sched:def:{token}".encode())],
+                        ],
+                        reply_to=event.id,
+                        parse_mode=None,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("failed to send schedule buttons: {}", exc)
+
             # Fire-and-forget message logging — never block the reply path
             asyncio.create_task(log_message(uid, "user", original_text))
             asyncio.create_task(log_message(

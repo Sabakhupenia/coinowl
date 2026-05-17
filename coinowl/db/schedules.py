@@ -21,12 +21,13 @@ async def create_schedule(
     tool_name: str,
     tool_args: dict[str, Any],
     original_phrasing: str,
+    delivery_mode: str = "push",
 ) -> dict[str, Any]:
     row = await pool().fetchrow(
         """
         INSERT INTO scheduled_pushes
-            (user_id, cron_expr, tool_name, tool_args_json, original_phrasing)
-        VALUES ($1, $2, $3, $4::jsonb, $5)
+            (user_id, cron_expr, tool_name, tool_args_json, original_phrasing, delivery_mode)
+        VALUES ($1, $2, $3, $4::jsonb, $5, $6)
         RETURNING *
         """,
         user_id,
@@ -34,6 +35,7 @@ async def create_schedule(
         tool_name,
         json.dumps(tool_args or {}),
         original_phrasing,
+        delivery_mode,
     )
     return _row_to_dict(row)
 
