@@ -28,6 +28,8 @@ from telethon.sessions import StringSession
 from coinowl import __version__
 from coinowl.agent import Agent, AgentResult
 from coinowl.agent.main import wants_chart
+from coinowl.agent.personality import PersonalityWrapper
+from coinowl.bot.watcher import BackgroundWatcher, drain_pending_for_user
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
 from coinowl.db import close_db, init_db
@@ -422,6 +424,13 @@ async def _amain() -> None:
             anthropic_api_key=settings.anthropic_api_key,
             coingecko=cg,
         )
+        personality = PersonalityWrapper(
+            openai_api_key=settings.openai_api_key,
+            gemini_api_key=settings.gemini_api_key,
+            openai_model=settings.openai_model,
+            gemini_model=settings.gemini_model,
+        )
+        watcher = BackgroundWatcher(client=client, cg=cg, personality=personality)
         follow_up_store: dict[int, dict] = {}
         last_reply_store: dict[int, str] = {}
         # Per-user list of user messages collected during onboarding. Cleared
@@ -499,6 +508,21 @@ async def _amain() -> None:
                     "Come back later!"
                 )
                 return
+            # Drain any scheduled summaries that fired while the user was away.
+            # Delivered as a prefix before the bot processes the actual message,
+            # so the watcher never interrupts mid-conversation. Onboarding users
+            # have no schedules yet — skip the round-trip.
+            if db_user.get("onboarded"):
+                try:
+                    await drain_pending_for_user(
+                        client=client,
+                        cg=cg,
+                        personality=personality,
+                        uid=uid,
+                        chat_id=event.chat_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("drain_pending_for_user failed for {}: {}", uid, exc)
             text = original_text
             # Expand short affirmations ("yes", "კი", "да") — but ONLY for
             # already-onboarded users. During onboarding, "კარგი" might be a
@@ -667,9 +691,17 @@ async def _amain() -> None:
 
         await client.start(bot_token=settings.telegram_bot_token)
         log.info("CoinOwl bot is up. Send it a message on Telegram.")
+        watcher_task = asyncio.create_task(watcher.run_forever())
         try:
             await client.run_until_disconnected()
         finally:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("watcher shutdown raised: {}", exc)
             await close_db()
 
 
