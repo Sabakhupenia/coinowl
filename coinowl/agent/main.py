@@ -122,6 +122,19 @@ def passes_guardrail(text: str) -> bool:
 _DELIVERABLE_KEYS = ("chart_png", "chart_html", "sparkline_png")
 
 
+# Tools the user can put on a schedule. Read-only / stats-producing tools are
+# allowed; meta-tools (set_user_profile, schedule_push itself, etc.) are not —
+# scheduling those would either be nonsensical or recursive.
+_SCHEDULABLE_TOOLS = frozenset({
+    "get_price",
+    "get_market_chart",
+    "get_chart",
+    "get_chart_html",
+    "get_top_movers",
+    "get_market_summary",
+})
+
+
 def _max_iter_text(side_effects: dict[str, Any]) -> str:
     """When max tool iterations is hit, prefer a soft message if we already
     produced something deliverable (a chart, html, sparkline) during the loop.
@@ -364,6 +377,177 @@ async def execute_tool(
             ],
             "count": len(matches),
         }
+
+    if tool_name == "set_price_alert":
+        if uid is None:
+            return {"error": "Internal: uid not available for set_price_alert"}
+        symbol = str(args.get("symbol", "")).strip().upper()
+        if not symbol:
+            return {"error": "Missing required argument: symbol"}
+        try:
+            threshold = float(args.get("threshold"))
+        except (TypeError, ValueError):
+            return {"error": "Argument 'threshold' must be a number (price in USD)"}
+        if threshold <= 0:
+            return {"error": "Argument 'threshold' must be positive"}
+        direction = str(args.get("direction", "")).strip().lower()
+        if direction not in ("above", "below"):
+            return {"error": "Argument 'direction' must be 'above' or 'below'"}
+        recurring = bool(args.get("recurring") or False)
+        original_phrasing = str(args.get("original_phrasing", "")).strip()
+        if not original_phrasing:
+            return {"error": "Argument 'original_phrasing' is required (the user's own words)"}
+        try:
+            coin_id = resolve(symbol)
+        except Exception:
+            return {"error": f"Unknown ticker: {symbol!r}. Use BTC, ETH, SOL, etc."}
+        from coinowl.db import alerts as db_alerts
+        try:
+            row = await db_alerts.create_alert(
+                user_id=uid,
+                symbol=symbol,
+                coin_id=coin_id,
+                threshold=threshold,
+                direction=direction,
+                recurring=recurring,
+                original_phrasing=original_phrasing,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("set_price_alert DB write failed: {}", exc)
+            return {"error": "Could not save the alert; try again"}
+        return {
+            "alert_id": row["id"],
+            "symbol": row["symbol"],
+            "threshold": float(row["threshold"]),
+            "direction": row["direction"],
+            "recurring": row["recurring"],
+        }
+
+    if tool_name == "list_price_alerts":
+        if uid is None:
+            return {"error": "Internal: uid not available for list_price_alerts"}
+        from coinowl.db import alerts as db_alerts
+        try:
+            rows = await db_alerts.list_alerts(uid, only_enabled=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("list_price_alerts failed: {}", exc)
+            return {"error": "Could not read alerts; try again"}
+        return {
+            "alerts": [
+                {
+                    "alert_id": r["id"],
+                    "symbol": r["symbol"],
+                    "threshold": float(r["threshold"]),
+                    "direction": r["direction"],
+                    "recurring": r["recurring"],
+                    "original_phrasing": r["original_phrasing"],
+                }
+                for r in rows
+            ],
+            "count": len(rows),
+        }
+
+    if tool_name == "cancel_price_alert":
+        if uid is None:
+            return {"error": "Internal: uid not available for cancel_price_alert"}
+        try:
+            alert_id = int(args.get("alert_id"))
+        except (TypeError, ValueError):
+            return {"error": "Argument 'alert_id' must be an integer (from list_price_alerts)"}
+        from coinowl.db import alerts as db_alerts
+        try:
+            cancelled = await db_alerts.cancel_alert(user_id=uid, alert_id=alert_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cancel_price_alert failed: {}", exc)
+            return {"error": "Could not cancel; try again"}
+        if not cancelled:
+            return {"error": f"No active alert with id {alert_id} found on your account"}
+        return {"cancelled": True, "alert_id": alert_id}
+
+    if tool_name == "schedule_push":
+        if uid is None:
+            return {"error": "Internal: uid not available for schedule_push"}
+        cron_expr = str(args.get("cron_expr", "")).strip()
+        if not cron_expr:
+            return {"error": "Argument 'cron_expr' is required (5-field cron, e.g. '0 9 * * 1' for every Monday 9am UTC)"}
+        from croniter import croniter
+        if not croniter.is_valid(cron_expr):
+            return {"error": f"Invalid cron expression: {cron_expr!r}. Use 5-field cron, e.g. '0 9 * * *' for daily 9am UTC."}
+        target_tool = str(args.get("tool_name", "")).strip()
+        if target_tool not in _SCHEDULABLE_TOOLS:
+            return {
+                "error": (
+                    f"Tool {target_tool!r} cannot be scheduled. "
+                    f"Schedulable: {', '.join(sorted(_SCHEDULABLE_TOOLS))}."
+                )
+            }
+        tool_args = args.get("tool_args") or {}
+        if not isinstance(tool_args, dict):
+            return {"error": "Argument 'tool_args' must be an object/dict"}
+        original_phrasing = str(args.get("original_phrasing", "")).strip()
+        if not original_phrasing:
+            return {"error": "Argument 'original_phrasing' is required (the user's own words)"}
+        from coinowl.db import schedules as db_sched
+        try:
+            row = await db_sched.create_schedule(
+                user_id=uid,
+                cron_expr=cron_expr,
+                tool_name=target_tool,
+                tool_args=tool_args,
+                original_phrasing=original_phrasing,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("schedule_push DB write failed: {}", exc)
+            return {"error": "Could not save the schedule; try again"}
+        from datetime import datetime, timezone
+        next_fire = croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+        return {
+            "schedule_id": row["id"],
+            "cron_expr": row["cron_expr"],
+            "tool_name": row["tool_name"],
+            "tool_args": row["tool_args_json"],
+            "next_fire_utc": next_fire.isoformat(),
+        }
+
+    if tool_name == "list_scheduled_pushes":
+        if uid is None:
+            return {"error": "Internal: uid not available for list_scheduled_pushes"}
+        from coinowl.db import schedules as db_sched
+        try:
+            rows = await db_sched.list_schedules(uid, only_enabled=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("list_scheduled_pushes failed: {}", exc)
+            return {"error": "Could not read schedules; try again"}
+        return {
+            "schedules": [
+                {
+                    "schedule_id": r["id"],
+                    "cron_expr": r["cron_expr"],
+                    "tool_name": r["tool_name"],
+                    "tool_args": r["tool_args_json"],
+                    "original_phrasing": r["original_phrasing"],
+                }
+                for r in rows
+            ],
+            "count": len(rows),
+        }
+
+    if tool_name == "cancel_scheduled_push":
+        if uid is None:
+            return {"error": "Internal: uid not available for cancel_scheduled_push"}
+        try:
+            schedule_id = int(args.get("schedule_id"))
+        except (TypeError, ValueError):
+            return {"error": "Argument 'schedule_id' must be an integer (from list_scheduled_pushes)"}
+        from coinowl.db import schedules as db_sched
+        try:
+            cancelled = await db_sched.cancel_schedule(user_id=uid, schedule_id=schedule_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cancel_scheduled_push failed: {}", exc)
+            return {"error": "Could not cancel; try again"}
+        if not cancelled:
+            return {"error": f"No active schedule with id {schedule_id} found on your account"}
+        return {"cancelled": True, "schedule_id": schedule_id}
 
     if tool_name == "get_top_movers":
         direction = str(args.get("direction", "")).strip().lower()
@@ -817,6 +1001,141 @@ _GEMINI_TOOLS = genai_types.Tool(
                 required=["direction", "window"],
             ),
         ),
+        genai_types.FunctionDeclaration(
+            name="set_price_alert",
+            description=(
+                "Create a price-threshold alert. The watcher pushes the user a "
+                "notification in real-time when the price crosses the threshold. "
+                "Use when the user says 'tell me when BTC hits 80k', "
+                "'let me know if ETH drops below 3000', 'მაცნობე როცა BTC მიაღწევს', "
+                "'сообщи когда BTC дойдёт до'. Set recurring=true ONLY if the user "
+                "said 'every time' or 'each time the price crosses'; default false "
+                "(alert auto-disables after first fire). original_phrasing MUST be "
+                "the user's own words verbatim — the bot reads it back when the "
+                "alert fires."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "symbol": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Ticker (BTC, ETH, …) or CoinGecko coin id.",
+                    ),
+                    "threshold": genai_types.Schema(
+                        type=genai_types.Type.NUMBER,
+                        description="Price in USD that triggers the alert when crossed.",
+                    ),
+                    "direction": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="'above' to fire when price > threshold; 'below' for price < threshold.",
+                    ),
+                    "recurring": genai_types.Schema(
+                        type=genai_types.Type.BOOLEAN,
+                        description="If true, re-arms after each fire. Default false (one-shot).",
+                    ),
+                    "original_phrasing": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="The user's own words when creating this alert (e.g. 'tell me when BTC hits 80k').",
+                    ),
+                },
+                required=["symbol", "threshold", "direction", "original_phrasing"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="list_price_alerts",
+            description=(
+                "Return the user's active price alerts. Use when the user asks "
+                "'what alerts do I have', 'show my alerts', 'რა შეტყობინებები მაქვს', "
+                "'мои оповещения'."
+            ),
+            parameters=genai_types.Schema(type=genai_types.Type.OBJECT, properties={}),
+        ),
+        genai_types.FunctionDeclaration(
+            name="cancel_price_alert",
+            description=(
+                "Cancel/disable a price alert by id. Get the id from list_price_alerts. "
+                "Use when the user says 'cancel my BTC alert' / 'remove that alert' — "
+                "if the user is ambiguous about WHICH alert, call list_price_alerts "
+                "first and ask them to pick."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "alert_id": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="ID returned by list_price_alerts.",
+                    ),
+                },
+                required=["alert_id"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="schedule_push",
+            description=(
+                "Schedule a recurring summary push. The bot fires the given tool on "
+                "the cron schedule and delivers the result the next time the user "
+                "messages (not in real-time — scheduled summaries wait for "
+                "engagement). Use for 'send me my watchlist every Monday morning', "
+                "'daily top movers please', 'weekly BTC chart'. Map natural-language "
+                "cadence to 5-field cron: 'every Monday 9am' → '0 9 * * 1'; "
+                "'every day at 8am' → '0 8 * * *'; 'every Sunday evening' → "
+                "'0 18 * * 0'; 'first of every month' → '0 9 1 * *'. Times are UTC. "
+                "tool_name must be one of: get_market_summary, get_top_movers, "
+                "get_price, get_market_chart, get_chart, get_chart_html. tool_args "
+                "is whatever args that tool needs (e.g. {'window':'7d'} for "
+                "get_market_summary, {'symbol':'BTC','days':7} for get_chart). "
+                "original_phrasing MUST be the user's own words verbatim."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "cron_expr": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="5-field cron in UTC, e.g. '0 9 * * 1' for Monday 9am.",
+                    ),
+                    "tool_name": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="Tool to fire each schedule tick.",
+                    ),
+                    "tool_args": genai_types.Schema(
+                        type=genai_types.Type.OBJECT,
+                        description="Args object passed to the scheduled tool.",
+                    ),
+                    "original_phrasing": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        description="The user's own words when creating this schedule.",
+                    ),
+                },
+                required=["cron_expr", "tool_name", "original_phrasing"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="list_scheduled_pushes",
+            description=(
+                "Return the user's active scheduled pushes. Use when they ask "
+                "'what summaries am I subscribed to', 'show my schedules', "
+                "'რა გრაფიკი მაქვს', 'мои подписки'."
+            ),
+            parameters=genai_types.Schema(type=genai_types.Type.OBJECT, properties={}),
+        ),
+        genai_types.FunctionDeclaration(
+            name="cancel_scheduled_push",
+            description=(
+                "Cancel/disable a scheduled push by id. Get the id from "
+                "list_scheduled_pushes. If the user is ambiguous about WHICH "
+                "schedule, call list_scheduled_pushes first and ask them to pick."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "schedule_id": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="ID returned by list_scheduled_pushes.",
+                    ),
+                },
+                required=["schedule_id"],
+            ),
+        ),
     ]
 )
 
@@ -1112,6 +1431,97 @@ _CLAUDE_TOOLS: list[dict[str, Any]] = [
             "required": ["direction", "window"],
         },
     },
+    {
+        "name": "set_price_alert",
+        "description": (
+            "Create a price-threshold alert that pushes to the user in real-time "
+            "when the price crosses. Set recurring=true ONLY if user said 'every "
+            "time'; default false (auto-disables after first fire). "
+            "original_phrasing MUST be the user's own words verbatim."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker or coin id."},
+                "threshold": {"type": "number", "description": "Price in USD."},
+                "direction": {
+                    "type": "string",
+                    "description": "'above' or 'below'.",
+                },
+                "recurring": {"type": "boolean", "description": "Default false."},
+                "original_phrasing": {
+                    "type": "string",
+                    "description": "User's own words.",
+                },
+            },
+            "required": ["symbol", "threshold", "direction", "original_phrasing"],
+        },
+    },
+    {
+        "name": "list_price_alerts",
+        "description": "Return the user's active price alerts.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancel_price_alert",
+        "description": "Cancel/disable a price alert by id (from list_price_alerts).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "alert_id": {"type": "integer", "description": "ID from list_price_alerts."},
+            },
+            "required": ["alert_id"],
+        },
+    },
+    {
+        "name": "schedule_push",
+        "description": (
+            "Schedule a recurring tool fire whose result is delivered the next "
+            "time the user messages. Use for 'every Monday morning send my "
+            "watchlist'. Map cadence to 5-field cron (UTC). tool_name must be "
+            "one of: get_market_summary, get_top_movers, get_price, "
+            "get_market_chart, get_chart, get_chart_html. tool_args is the dict "
+            "passed to that tool. original_phrasing MUST be user's own words."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cron_expr": {
+                    "type": "string",
+                    "description": "5-field cron in UTC, e.g. '0 9 * * 1'.",
+                },
+                "tool_name": {
+                    "type": "string",
+                    "description": "Tool to fire on each tick.",
+                },
+                "tool_args": {
+                    "type": "object",
+                    "description": "Args dict for the scheduled tool.",
+                },
+                "original_phrasing": {
+                    "type": "string",
+                    "description": "User's own words.",
+                },
+            },
+            "required": ["cron_expr", "tool_name", "original_phrasing"],
+        },
+    },
+    {
+        "name": "list_scheduled_pushes",
+        "description": "Return the user's active scheduled pushes.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancel_scheduled_push",
+        "description": "Cancel/disable a scheduled push by id (from list_scheduled_pushes).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "integer", "description": "ID from list_scheduled_pushes."},
+            },
+            "required": ["schedule_id"],
+        },
+    },
 ]
 
 
@@ -1360,6 +1770,80 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
             },
         },
         ["direction", "window"],
+    ),
+    _openai_tool(
+        "set_price_alert",
+        "Create a price-threshold alert. The watcher pushes the user in real-time "
+        "when the price crosses. Set recurring=true ONLY if the user said 'every "
+        "time'; default false (auto-disables after first fire). original_phrasing "
+        "MUST be the user's own words verbatim.",
+        {
+            "symbol": {"type": "string", "description": "Ticker or coin id."},
+            "threshold": {"type": "number", "description": "Price in USD."},
+            "direction": {"type": "string", "description": "'above' or 'below'."},
+            "recurring": {"type": "boolean", "description": "Default false."},
+            "original_phrasing": {
+                "type": "string",
+                "description": "User's own words.",
+            },
+        },
+        ["symbol", "threshold", "direction", "original_phrasing"],
+    ),
+    _openai_tool(
+        "list_price_alerts",
+        "Return the user's active price alerts.",
+        {},
+        [],
+    ),
+    _openai_tool(
+        "cancel_price_alert",
+        "Cancel/disable a price alert by id (from list_price_alerts).",
+        {"alert_id": {"type": "integer", "description": "ID from list_price_alerts."}},
+        ["alert_id"],
+    ),
+    _openai_tool(
+        "schedule_push",
+        "Schedule a recurring tool fire delivered the next time the user messages. "
+        "Use for 'every Monday morning send my watchlist'. Map cadence to 5-field "
+        "cron (UTC). tool_name must be one of: get_market_summary, get_top_movers, "
+        "get_price, get_market_chart, get_chart, get_chart_html. tool_args is the "
+        "dict passed to that tool. original_phrasing MUST be user's own words.",
+        {
+            "cron_expr": {
+                "type": "string",
+                "description": "5-field cron in UTC, e.g. '0 9 * * 1'.",
+            },
+            "tool_name": {
+                "type": "string",
+                "description": "Tool to fire on each tick.",
+            },
+            "tool_args": {
+                "type": "object",
+                "description": "Args dict for the scheduled tool.",
+            },
+            "original_phrasing": {
+                "type": "string",
+                "description": "User's own words.",
+            },
+        },
+        ["cron_expr", "tool_name", "original_phrasing"],
+    ),
+    _openai_tool(
+        "list_scheduled_pushes",
+        "Return the user's active scheduled pushes.",
+        {},
+        [],
+    ),
+    _openai_tool(
+        "cancel_scheduled_push",
+        "Cancel/disable a scheduled push by id (from list_scheduled_pushes).",
+        {
+            "schedule_id": {
+                "type": "integer",
+                "description": "ID from list_scheduled_pushes.",
+            },
+        },
+        ["schedule_id"],
     ),
 ]
 
