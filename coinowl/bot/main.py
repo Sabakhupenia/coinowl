@@ -336,10 +336,12 @@ def _user_context_block(db_user: dict, *, remaining: int) -> str | None:
         return None
     langs = ", ".join(db_user.get("preferred_languages") or ["en"])
     watched = db_user.get("watched_coins") or []
+    timezone = db_user.get("timezone") or "Asia/Tbilisi"
     parts = [
         "## CURRENT USER",
         f"Name: {db_user['display_name']}",
         f"Preferred languages: {langs}",
+        f"Timezone: {timezone}",
         f"Quota: {remaining} of 10 messages remaining in the current 3-hour rolling window.",
     ]
     if watched:

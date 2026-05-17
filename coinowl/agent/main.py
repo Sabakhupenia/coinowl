@@ -200,17 +200,36 @@ async def execute_tool(
                 return {"error": f"Unknown ticker: {sym!r}. Use BTC, ETH, SOL, etc."}
         if len(coins) > db_users.WATCHLIST_MAX:
             return {"error": f"Watchlist capped at {db_users.WATCHLIST_MAX} coins; pick up to {db_users.WATCHLIST_MAX}."}
+        # Auto-detect timezone from preferred languages so scheduled-push time
+        # conversion works without an explicit onboarding question. Users can
+        # change later via admin or a profile-edit tool.
+        tz_arg = str(args.get("timezone", "")).strip()
+        if tz_arg:
+            timezone = tz_arg
+        elif "ka" in langs:
+            timezone = "Asia/Tbilisi"
+        elif "ru" in langs:
+            timezone = "Europe/Moscow"
+        else:
+            timezone = "Asia/Tbilisi"  # bot's current user base; safe fallback
         try:
             await db_users.set_profile(
                 uid,
                 display_name=name,
                 preferred_languages=langs,
                 coins=coins,
+                timezone=timezone,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("set_user_profile DB write failed: {}", exc)
             return {"error": "Could not save profile; try again"}
-        return {"profile_set": True, "name": name, "languages": langs, "coins": coins}
+        return {
+            "profile_set": True,
+            "name": name,
+            "languages": langs,
+            "coins": coins,
+            "timezone": timezone,
+        }
 
     if tool_name == "update_watchlist":
         if uid is None:

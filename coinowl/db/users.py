@@ -44,28 +44,61 @@ async def set_profile(
     display_name: str,
     preferred_languages: list[str],
     coins: list[str],
+    timezone: str | None = None,
 ) -> None:
     """Save full onboarding profile (name + languages + watchlist) atomically.
 
-    Recomputes `onboarded` from the new values.
+    Recomputes `onboarded` from the new values. If timezone is None, the
+    existing DB value is kept (default 'Asia/Tbilisi' for new rows).
     """
+    if timezone is None:
+        await pool().execute(
+            """
+            UPDATE users
+               SET display_name        = $2::text,
+                   preferred_languages = $3::text[],
+                   watched_coins       = $4::text[],
+                   onboarded           = (
+                     $2::text IS NOT NULL
+                     AND COALESCE(array_length($3::text[], 1), 0) >= 1
+                     AND COALESCE(array_length($4::text[], 1), 0) >= 1
+                   )
+             WHERE user_id = $1
+            """,
+            user_id,
+            display_name,
+            preferred_languages,
+            coins,
+        )
+    else:
+        await pool().execute(
+            """
+            UPDATE users
+               SET display_name        = $2::text,
+                   preferred_languages = $3::text[],
+                   watched_coins       = $4::text[],
+                   timezone            = $5::text,
+                   onboarded           = (
+                     $2::text IS NOT NULL
+                     AND COALESCE(array_length($3::text[], 1), 0) >= 1
+                     AND COALESCE(array_length($4::text[], 1), 0) >= 1
+                   )
+             WHERE user_id = $1
+            """,
+            user_id,
+            display_name,
+            preferred_languages,
+            coins,
+            timezone,
+        )
+
+
+async def set_timezone(user_id: int, timezone: str) -> None:
+    """Update only the timezone field."""
     await pool().execute(
-        """
-        UPDATE users
-           SET display_name        = $2::text,
-               preferred_languages = $3::text[],
-               watched_coins       = $4::text[],
-               onboarded           = (
-                 $2::text IS NOT NULL
-                 AND COALESCE(array_length($3::text[], 1), 0) >= 1
-                 AND COALESCE(array_length($4::text[], 1), 0) >= 1
-               )
-         WHERE user_id = $1
-        """,
+        "UPDATE users SET timezone = $2::text WHERE user_id = $1",
         user_id,
-        display_name,
-        preferred_languages,
-        coins,
+        timezone,
     )
 
 
