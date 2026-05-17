@@ -225,12 +225,12 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 ## Roadmap
 
-1. **v0.7.3 — Price alerts:** `alerts` table, user-configured polling intervals (5m / 30m / 1h / daily / custom), background watcher task that wakes per-alert, Telegram push on threshold cross. Example user-flow: "tell me when BTC reaches $80k or drops below $75k" → bot stores two alerts → watcher pings user when either threshold crosses. Survives bot restart (state lives in Postgres).
-2. **v0.7.4 — Daily digest:** per-user schedule, auto-pushed market summary at configured hour (reuses v0.7.1 summary tooling + v0.7.3 push channel).
-3. **News RAG:** CoinDesk RSS → `knowledge_chunks` with Gemini embeddings → grounded "why did X drop?" answers.
-4. **`/similar` tool:** bootstrap `coins` table from CoinGecko coin-detail endpoints + embed; vector similarity search.
-5. **Chart render cache:** key by `(symbol, days, kind)`; skip kaleido on repeats.
-6. **Test suite + CI:** unit tests for guardrail regex, `wants_chart`, `resolve()`, yes-expansion, quota math. GitHub Actions for import smoke + lint.
+1. **v0.7.3 — Alerts & subscriptions:** unified background-watcher feature with two trigger types sharing one push channel. (a) **Price alerts** — `alerts` table with threshold conditions; "tell me when BTC > $80k or < $75k" → bot stores two rows → watcher pings user on cross. (b) **Scheduled summary pushes** — `scheduled_pushes` table with `(user_id, cron_expr, tool_name, tool_args_json, last_fired_at)`; "send me my watchlist summary every Monday 9am" → LLM calls `schedule_push(cron="0 9 * * 1", tool="get_market_summary", args={"window":"7d"})` → watcher fires the tool and pushes the result. LLM gains tools: `schedule_push`, `list_scheduled_pushes`, `cancel_scheduled_push`, plus the existing alert-creation tools. Both survive restart (state in Postgres).
+2. **v0.7.4 — Deployment release (shipped):** `StringSession` support + `scripts/dump_session.py` helper for stateless cloud hosts (Railway, Fly). Bot now runs 24/7 — prerequisite for v0.7.3 watcher to actually fire.
+3. **v0.7.5 — Infra consolidation:** test suite + CI (unit tests for guardrail regex, `wants_chart`, `resolve()`, yes-expansion, quota math; GitHub Actions import smoke + lint) **and** chart render cache (key by `(symbol, days, kind)`; skip kaleido on repeats — matters once v0.7.3 scheduled summaries fire simultaneously for every subscribed user).
+4. **v0.8 — News RAG:** CoinDesk RSS → `knowledge_chunks` with Gemini 768d embeddings → grounded "why did X drop?" answers. New ingest cron, chunker, separate vector table.
+5. **v0.9 — `/similar` tool:** bootstrap `coins` table from CoinGecko coin-detail endpoints + embed (per-coin feature vector, refreshed on a cron); vector similarity search for "find coins behaving like BTC".
+6. **v1.0 — Exit pre-alpha:** `__version__` bump `0.x → 1.0.0`, README rewrite (drop pre-alpha framing, fix stale architecture diagram), final polish pass. Pure ceremony commit — no new features.
 
 ---
 
