@@ -36,6 +36,7 @@ python main.py
 | `OPENAI_MODEL` | Defaults to `gpt-5.4-mini` (2.5M tokens/day free) |
 | `ANTHROPIC_API_KEY` | No last-resort fallback; if both OpenAI and Gemini fail, user sees an error |
 | `COINGECKO_API_KEY` | Free tier (~5 req/min); demo key gives 30 req/min |
+| `ADMIN_TELEGRAM_USER_ID` | `/admin` command is fully disabled. With this set, only that Telegram user_id can invoke it; everyone else gets a silent no-op so the surface stays invisible to other users |
 
 **First run:** Telethon opens a browser or prompts for a phone number to authenticate. This writes `coinowl_bot.session` (gitignored). Subsequent runs reuse the session silently.
 
@@ -187,6 +188,8 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - **OpenAI free-tier model defaults to `gpt-5.4-mini`.** 2.5M tokens/day on the traffic-share tier. Override with `OPENAI_MODEL=gpt-5.4` for higher quality (250K/day budget). The chart-render path is unaffected by model choice — Plotly does the rendering.
 
 - **README is partially stale.** Architecture diagram still shows Groq (dropped). `/interactive` command is listed but not implemented. Roadmap phases in README don't match current commit history exactly.
+
+- **`/admin` is gated, not authenticated.** Live in `coinowl/bot/admin.py`. Sender is checked against `settings.admin_user_id`; non-admins get a silent no-op (the handler returns before sending anything). Subcommands: `/admin users [N]` (top N by last_seen with cap + window usage), `/admin info <uid>` (full profile), `/admin setlimit <uid> <N>` (writes `users.quota_override`), `/admin unsetlimit <uid>` (clears it), `/admin clearquota <uid>` (deletes `quota_log` rows for that user — frees them up immediately). Quota override survives restart (DB-backed); `check_and_consume` reads it on every message. Output is HTML; user-controlled fields run through `html.escape()` via `_esc()`.
 
 - **No test suite.** `tests/__init__.py` exists but is empty. Before committing logic changes, run a quick import smoke test: `python -c "from coinowl.bot.main import run"`.
 

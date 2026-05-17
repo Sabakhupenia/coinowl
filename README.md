@@ -82,6 +82,29 @@ The primary surface is **natural language** — ask the bot anything about crypt
 
 First time a user messages the bot they go through onboarding: pick a display name, preferred language(s), and at least one coin for the watchlist. The `onboarded` flag is computed in SQL from those three fields, so if any is missing the bot re-enters onboarding on the next message.
 
+### Operator commands (admin only)
+
+`/admin` is a gated command for the bot operator. It only works if `ADMIN_TELEGRAM_USER_ID` is set in the env (your own Telegram user_id) and the sender matches — for everyone else the command is a silent no-op, so friends and visitors won't even discover the surface exists.
+
+```
+ADMIN_TELEGRAM_USER_ID=<your-telegram-user-id>
+```
+
+(Get your user_id from [@userinfobot](https://t.me/userinfobot) on Telegram, or check `chat from <id>:` lines in `logs/coinowl.log` while you message the bot.)
+
+Once set, in a Telegram DM with the bot:
+
+| Command | What it does |
+|---|---|
+| `/admin` | Show the admin help screen |
+| `/admin users [N]` | List top N users by last_seen (default 10, max 50). Each row shows display name, @username, user_id, last_seen, total messages, current 3-hour window usage, and quota cap (with `(override)` flag if customized) |
+| `/admin info <user_id>` | Detailed profile: languages, timezone, watchlist, active alerts/schedules counts, quota usage, join + last-seen timestamps |
+| `/admin setlimit <user_id> <N>` | Raise/lower one user's quota cap. `0..10000`. Takes effect on their next message — no restart needed |
+| `/admin unsetlimit <user_id>` | Clear the override, back to the default 10/3h |
+| `/admin clearquota <user_id>` | Wipe their `quota_log` rows — frees them up immediately |
+
+Quota overrides persist in Postgres (`users.quota_override`) so they survive bot restarts.
+
 ## Setup
 
 ```bash
