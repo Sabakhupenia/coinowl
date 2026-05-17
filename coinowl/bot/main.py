@@ -673,8 +673,29 @@ async def _amain() -> None:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("recent_messages fetch failed: {}", exc)
                     recent = []
+                # If user long-pressed a prior message and tapped Reply, surface
+                # the quoted text so the LLM knows what "this" / "that" refers to.
+                reply_block: str | None = None
+                if event.message and event.message.is_reply:
+                    try:
+                        quoted = await event.message.get_reply_message()
+                        if quoted and (quoted.raw_text or "").strip():
+                            qtext = quoted.raw_text.strip()
+                            if len(qtext) > 1500:
+                                qtext = qtext[:1500] + "…"
+                            reply_block = (
+                                "## REPLYING TO\n"
+                                "The user used Telegram's Reply feature to quote "
+                                "this earlier message. Treat 'this' / 'that' / "
+                                "'translate this' references in the user's message "
+                                "as pointing to the quoted text below:\n\n"
+                                f"{qtext}"
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("reply-message fetch failed for {}: {}", uid, exc)
                 blocks = [
                     block for block in (
+                        reply_block,
                         _recent_conversation_block(recent),
                         _user_context_block(db_user, remaining=remaining),
                     )
