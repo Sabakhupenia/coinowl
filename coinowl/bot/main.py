@@ -32,6 +32,7 @@ from coinowl import __version__
 from coinowl.agent import Agent, AgentResult
 from coinowl.agent.main import wants_chart
 from coinowl.agent.personality import PersonalityWrapper
+from coinowl.bot.admin import handle_admin_command
 from coinowl.bot.watcher import BackgroundWatcher, drain_pending_for_user
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
@@ -469,6 +470,21 @@ async def _amain() -> None:
         @client.on(events.NewMessage(pattern=r"^/disclaimer(?:\s|$|@)"))
         async def disclaimer(event: events.NewMessage.Event) -> None:
             await event.reply(_DISCLAIMER_TEXT)
+
+        @client.on(events.NewMessage(pattern=r"^/admin(?:\s+(.*))?$"))
+        async def admin(event: events.NewMessage.Event) -> None:
+            # Silently ignore for non-admins — friends won't even discover the
+            # surface exists. If admin_user_id is unset (env var not provided),
+            # /admin is fully disabled.
+            if settings.admin_user_id is None or event.sender_id != settings.admin_user_id:
+                return
+            raw = event.pattern_match.group(1) or ""
+            try:
+                reply = await handle_admin_command(raw)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("admin command failed: {}", exc)
+                reply = f"⚠️ Admin command errored: {_esc(str(exc))}"
+            await event.reply(reply)
 
         @client.on(events.CallbackQuery(pattern=rb"^sched:"))
         async def schedule_mode_callback(event: events.CallbackQuery.Event) -> None:

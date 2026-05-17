@@ -27,6 +27,7 @@ class Settings:
     anthropic_api_key: str | None  # last-resort fallback LLM
     coingecko_api_key: str | None  # demo plan key, optional
     database_url: str              # Supabase Postgres (session pooler, port 5432)
+    admin_user_id: int | None      # Telegram user_id allowed to use /admin commands
 
 
 def _require(name: str) -> str:
@@ -53,6 +54,18 @@ def load_settings() -> Settings:
             f"TELEGRAM_API_ID must be an integer, got {api_id_raw!r}."
         ) from exc
 
+    admin_raw = _optional("ADMIN_TELEGRAM_USER_ID")
+    admin_user_id: int | None
+    if admin_raw is None:
+        admin_user_id = None
+    else:
+        try:
+            admin_user_id = int(admin_raw)
+        except ValueError as exc:
+            raise MissingEnvVarError(
+                f"ADMIN_TELEGRAM_USER_ID must be an integer if set, got {admin_raw!r}."
+            ) from exc
+
     return Settings(
         telegram_api_id=api_id,
         telegram_api_hash=_require("TELEGRAM_API_HASH"),
@@ -65,4 +78,5 @@ def load_settings() -> Settings:
         anthropic_api_key=_optional("ANTHROPIC_API_KEY"),
         coingecko_api_key=_optional("COINGECKO_API_KEY"),
         database_url=_require("DATABASE_URL"),
+        admin_user_id=admin_user_id,
     )
