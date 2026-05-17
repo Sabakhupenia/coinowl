@@ -60,6 +60,36 @@ _OFF_TOPIC_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bingredients?\s*:", re.IGNORECASE),
     # Legal advice
     re.compile(r"\b(legal advice|hire a lawyer|sue them|file suit)\b", re.IGNORECASE),
+
+    # === Transactional how-to (scam-enabling content) ===
+    # English instructional language tied to crypto transfer actions
+    re.compile(r"\bwallet\s+address\b", re.IGNORECASE),
+    re.compile(r"\bnetwork\s+fee\b", re.IGNORECASE),
+    re.compile(r"\bgas\s+fee\b", re.IGNORECASE),
+    re.compile(r"\bSend\s*/\s*Withdraw\b", re.IGNORECASE),
+    re.compile(r"\b(send|withdraw|swap)\s+button\b", re.IGNORECASE),
+    re.compile(r"\b(paste|enter|copy)\b[^\.]{0,40}\b(address|wallet)\b", re.IGNORECASE),
+    re.compile(r"\b(click|press|tap|hit)\b[^\.]{0,40}\b(send|withdraw|confirm)\b", re.IGNORECASE),
+    re.compile(r"\bstep\s*[-]?\s*by\s*[-]?\s*step\b[^\.]{0,80}\b(send|transfer|withdraw|buy)\b", re.IGNORECASE),
+    re.compile(r"\b(test\s+transaction|small\s+test\s+amount)\b", re.IGNORECASE),
+    # Specific wallet / exchange names — out-of-scope to recommend
+    re.compile(r"\b(Trust\s*Wallet|MetaMask|Phantom|Coinbase\s+Wallet|Ledger\s+Live)\b", re.IGNORECASE),
+    re.compile(r"\b(on\s+Binance|on\s+Coinbase|on\s+Kraken|on\s+Bybit|on\s+OKX)\b", re.IGNORECASE),
+
+    # Georgian transactional patterns (ქართული)
+    re.compile(r"მიმღების\s+(address|wallet|მისამართი)", re.IGNORECASE),
+    re.compile(r"(ჩასვი|ჩაწერე|დააკოპირე)[^\.]{0,40}(address|მისამართი|wallet|საფულე)", re.IGNORECASE),
+    re.compile(r"(დააჭირე|აირჩიე)[^\.]{0,40}(Send|Withdraw|გაგზავნე|გადარიცხე)", re.IGNORECASE),
+    re.compile(r"ეტაპობრივად[^\.]{0,120}(გაგზავნ|გადარიცხ|ამოღებ)", re.IGNORECASE),
+    re.compile(r"საფულე[^\.]{0,40}საფულე(ში|ზე)", re.IGNORECASE),  # "wallet to wallet"
+    re.compile(r"სატესტო\s+(თანხ|ტრანზაქცი)", re.IGNORECASE),       # "test transaction/amount"
+
+    # Russian transactional patterns
+    re.compile(r"\bадрес\s+(кошел[её]к|получател)", re.IGNORECASE),
+    re.compile(r"\b(вставь|введи|укажи|скопируй)[^\.]{0,40}\b(адрес|кошел[её]к)", re.IGNORECASE),
+    re.compile(r"\b(нажми|кликни|жми)[^\.]{0,40}\b(send|withdraw|отправ|вывест|подтверд)", re.IGNORECASE),
+    re.compile(r"пошагово[^\.]{0,120}(перевод|отправ|вывод|обмен)", re.IGNORECASE),
+    re.compile(r"тестов\w+\s+(перевод|транзакц|сумм)", re.IGNORECASE),
 ]
 
 
@@ -88,11 +118,22 @@ _CLASSIFIER_SYSTEM = (
     "  • Legal advice\n"
     "  • Generic life/relationship/psychological advice\n"
     "  • Non-crypto chit-chat content\n"
+    "  • **TRANSACTIONAL HOW-TO** — this is the most important rule. The bot "
+    "    must NEVER walk through HOW TO send/transfer/buy/sell/withdraw/swap "
+    "    crypto, HOW TO set up a wallet, HOW TO use a specific exchange, what "
+    "    network/chain to pick, how to copy/paste addresses, how to verify "
+    "    transactions, what gas/network fees to use. ALSO not allowed: "
+    "    recommending specific wallets/exchanges (Trust Wallet, MetaMask, "
+    "    Binance, Coinbase, etc.). This applies EVEN IF the content is "
+    "    technically about cryptocurrency — the bot is STATS only, NOT a "
+    "    transaction tutor. Step-by-step transfer instructions are the prime "
+    "    example of OFF_TOPIC even when the topic is 'crypto'.\n"
     "\n"
     "Read the bot reply provided by the user and respond with EXACTLY ONE WORD:\n"
     "  CRYPTO    — if the reply is entirely within the allowed scope\n"
     "  OFF_TOPIC — if it contains ANY content outside the allowed scope, "
-    "              EVEN A SINGLE LINE OR SNIPPET tucked at the end\n"
+    "              EVEN A SINGLE LINE OR SNIPPET tucked at the end. "
+    "              Step-by-step transfer/buy/wallet instructions are OFF_TOPIC.\n"
     "\n"
     "Do not explain. One word only."
 )
