@@ -33,8 +33,13 @@ async def _main() -> None:
             f"Set it in .env (or your shell) before running this script."
         )
 
-    async with TelegramClient(StringSession(), api_id, api_hash) as client:
-        await client.start(bot_token=bot_token)
+    # NOT using `async with TelegramClient(...) as client:` — that form calls
+    # client.start() with no args first, which triggers the interactive
+    # "please enter your phone" prompt before we get a chance to pass
+    # bot_token. Explicit connect+disconnect avoids that.
+    client = TelegramClient(StringSession(), api_id, api_hash)
+    await client.start(bot_token=bot_token)
+    try:
         s = client.session.save()
         print()
         print("=" * 70)
@@ -43,6 +48,8 @@ async def _main() -> None:
         print(s)
         print("=" * 70)
         print()
+    finally:
+        await client.disconnect()
 
 
 if __name__ == "__main__":
