@@ -709,6 +709,7 @@ async def _amain() -> None:
                 on_progress=streaming.on_progress,
                 uid=uid,
                 user_context=user_context,
+                user_languages=db_user.get("preferred_languages"),
             )
             # Update follow-up context for the next "yes"
             if result.chart_context:

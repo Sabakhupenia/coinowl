@@ -308,19 +308,70 @@ DO NOT add a "this is not financial advice" disclaimer to every reply — users
 can run /disclaimer for that. Stay on the user's actual question."""
 
 
-GUARDRAIL_REFUSAL = (
-    "I can't make predictions or give buy/sell advice — that's not what I do. "
-    "I can show you the current price or recent price history if that helps. "
-    "Try something like \"what's BTC at?\" or \"how did ETH do this week?\""
-)
+_GUARDRAIL_REFUSAL_BY_LANG: dict[str, str] = {
+    "en": (
+        "I can't make predictions or give buy/sell advice — that's not what I do. "
+        "I can show you the current price or recent price history if that helps. "
+        "Try something like \"what's BTC at?\" or \"how did ETH do this week?\""
+    ),
+    "ka": (
+        "ვერ ვაკეთებ პროგნოზებს და ვერ გაძლევ „იყიდე/გაყიდე“ რჩევებს — ეს ჩემი საქმე არ არის. "
+        "შემიძლია გითხრა მიმდინარე ფასი ან ბოლო პერიოდის ცვლილებები. "
+        "სცადე მაგ. „BTC ფასი“ ან „ETH-ის 7 დღის გრაფიკი“."
+    ),
+    "ru": (
+        "Я не делаю прогнозов и не даю советов «покупать/продавать» — это не моя работа. "
+        "Могу показать текущую цену или историю изменений. "
+        "Попробуй, например, «цена BTC» или «график ETH за неделю»."
+    ),
+}
 
 
-OFFTOPIC_REFUSAL = (
-    "🦉 I'm a crypto stats bot — I can only help with prices, market data, "
-    "charts, your watchlist, and alerts. For other topics (code, recipes, "
-    "medical, general life questions), try a general-purpose assistant. "
-    "Run /help to see what I can do, or ask me something like \"what's BTC at?\"."
-)
+_OFFTOPIC_REFUSAL_BY_LANG: dict[str, str] = {
+    "en": (
+        "🦉 I'm a crypto stats bot — I can only help with prices, market data, "
+        "charts, your watchlist, and alerts. For other topics (code, recipes, "
+        "medical, general life questions), try a general-purpose assistant. "
+        "Run /help to see what I can do, or ask me something like \"what's BTC at?\"."
+    ),
+    "ka": (
+        "🦉 მე კრიპტო სტატების ბოტი ვარ — შემიძლია დაგეხმარო მხოლოდ ფასებით, "
+        "ბაზრის მონაცემებით, გრაფიკებით, ვოჩლისტითა და ალერტებით. სხვა თემებისთვის "
+        "(კოდი, რეცეპტი, სამედიცინო, ცხოვრებისეული კითხვები) გამოიყენე ზოგადი "
+        "ასისტენტი. /help-ით ნახე რა შემიძლია, ან მკითხე მაგალითად „BTC ფასი“."
+    ),
+    "ru": (
+        "🦉 Я бот криптостатистики — могу помочь только с ценами, рыночными "
+        "данными, графиками, вотчлистом и оповещениями. По другим темам "
+        "(код, рецепты, медицина, общие жизненные вопросы) обратись к "
+        "универсальному ассистенту. Запусти /help чтобы увидеть мои "
+        "возможности, или спроси, например, «цена BTC»."
+    ),
+}
+
+
+# Backwards-compat: existing imports that expect a plain string get English.
+GUARDRAIL_REFUSAL = _GUARDRAIL_REFUSAL_BY_LANG["en"]
+OFFTOPIC_REFUSAL = _OFFTOPIC_REFUSAL_BY_LANG["en"]
+
+
+def _pick_by_lang(table: dict[str, str], languages: list[str] | None) -> str:
+    """Return the table entry for the first matched language code in the
+    user's preferred list. Falls back to English."""
+    if languages:
+        for lang in languages:
+            norm = (lang or "").strip().lower()[:2]
+            if norm in table:
+                return table[norm]
+    return table["en"]
+
+
+def guardrail_refusal(languages: list[str] | None) -> str:
+    return _pick_by_lang(_GUARDRAIL_REFUSAL_BY_LANG, languages)
+
+
+def offtopic_refusal(languages: list[str] | None) -> str:
+    return _pick_by_lang(_OFFTOPIC_REFUSAL_BY_LANG, languages)
 
 
 PROVIDER_FAILED = (
