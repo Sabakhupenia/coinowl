@@ -23,6 +23,7 @@ def _esc(s: str) -> str:
 
 from telethon import TelegramClient, events
 from telethon.errors import MessageNotModifiedError
+from telethon.sessions import StringSession
 
 from coinowl import __version__
 from coinowl.agent import Agent, AgentResult
@@ -111,8 +112,17 @@ _PRICE_USAGE_TEXT = (
 
 
 def _build_client(settings: Settings) -> TelegramClient:
+    # When TELEGRAM_SESSION_STRING is set (Railway / stateless deploys), hydrate
+    # auth from the env var so we don't depend on a *.session file surviving
+    # container restarts. Local dev falls back to the named SQLite file session.
+    session: Any
+    if settings.telegram_session_string:
+        session = StringSession(settings.telegram_session_string)
+        log.info("Using TELEGRAM_SESSION_STRING for Telethon auth (stateless mode)")
+    else:
+        session = "coinowl_bot"
     return TelegramClient(
-        session="coinowl_bot",
+        session=session,
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
     )

@@ -19,6 +19,7 @@ class Settings:
     telegram_api_id: int
     telegram_api_hash: str
     telegram_bot_token: str
+    telegram_session_string: str | None  # if set, used instead of .session file (for Railway / stateless deploys)
     gemini_api_key: str
     gemini_model: str              # default: gemini-2.5-flash
     openai_api_key: str | None     # primary LLM for non-chart queries; unset = Gemini-only
@@ -56,6 +57,7 @@ def load_settings() -> Settings:
         telegram_api_id=api_id,
         telegram_api_hash=_require("TELEGRAM_API_HASH"),
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
+        telegram_session_string=_optional("TELEGRAM_SESSION_STRING"),
         gemini_api_key=_require("GEMINI_API_KEY"),
         gemini_model=os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash",
         openai_api_key=_optional("OPENAI_API_KEY"),
