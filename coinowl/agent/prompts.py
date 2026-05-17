@@ -207,16 +207,40 @@ SCHEDULED SUMMARY PUSHES — fire on a cron schedule. Two delivery modes:
   • 'push' — sent to Telegram as a notification when the schedule fires
   • 'deferred' — saved and delivered as a prefix on the user's NEXT message
 
-DELIVERY MODE IS PICKED BY THE USER VIA BUTTONS. Do NOT pass delivery_mode
-yourself unless the user was unambiguously explicit in their original
-message ("PUSH me my watchlist", "JUST SAVE my top movers as history"). For
-normal phrasing like "send me X every Monday", call schedule_push WITHOUT
-delivery_mode — the bot will send the user two inline buttons (🔔 Notify /
-📋 Save for next visit) after your reply, and they tap one. After
-schedule_push returns with status='needs_delivery_mode', write a brief one-
-line confirmation (e.g. "Got it — every Sunday at 9am UTC, watchlist
-summary. How should I deliver it?") in the user's language. Do NOT describe
-the modes in your text — the button labels speak for themselves.
+DELIVERY MODE — DEFAULTS TO BUTTONS, BYPASS IF USER IS EXPLICIT.
+By default call schedule_push WITHOUT delivery_mode — the bot sends inline
+buttons (🔔 Notify / 📋 Save for next visit) and the user taps. But IF the
+user's message contains any of these EXPLICIT mode keywords (case-insensitive,
+in any of the three languages), skip the buttons by passing delivery_mode
+directly:
+
+  delivery_mode='push' triggers:
+    EN: "push me", "push it", "notify me", "alert me when", "as a notification",
+        "send me a notification", "ping me when"
+    KA: "შემატყობინე", "შეტყობინება", "გამიგზავნე შეტყობინებად"
+    RU: "уведомляй", "уведомление", "пуш", "присылай уведомление"
+
+  delivery_mode='deferred' triggers:
+    EN: "save it", "save for later", "save for next visit", "save as history",
+        "have it ready", "for when I check in", "next time we chat"
+    KA: "შეინახე", "ისტორია", "შემდეგ ჯერზე"
+    RU: "сохрани", "сохранять", "сохранить", "история", "следующий раз"
+
+  AMBIGUOUS — DO use buttons (call WITHOUT delivery_mode):
+    "send me X every Monday" ("send" alone doesn't disambiguate)
+    "every day at 9am give me Y" (timing-only phrasing)
+    "schedule X for me" (no mode hint)
+    Any short request without an explicit mode keyword
+
+After schedule_push returns with status='needs_delivery_mode' (buttons path),
+write a brief one-line confirmation (e.g. "Got it — every Sunday at 9am UTC,
+watchlist summary. How should I deliver it?") in the user's language. Do NOT
+describe the modes in your text — the button labels speak for themselves.
+
+After schedule_push returns with status='created' (explicit-bypass path),
+confirm in one sentence with the chosen mode named clearly. Examples:
+"Done — I'll push a BTC chart to you every hour 🔔" /
+"Saved — your daily top gainers will be waiting next time you message me 📋".
 
 - schedule_push: use when the user says "send me my watchlist every Monday
   morning", "daily top movers please", "weekly BTC chart at 9am", "ყოველ
