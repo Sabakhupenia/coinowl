@@ -185,7 +185,7 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **`OPENAI_API_KEY` is optional but recommended.** Without it, every message routes to Gemini and the per-day RPD limit becomes the bottleneck. With it, only chart-keyword messages hit Gemini.
 
-- **OpenAI free-tier model defaults to `gpt-5.4-mini`.** 2.5M tokens/day on the traffic-share tier. Override with `OPENAI_MODEL=gpt-5.4` for higher quality (250K/day budget). The chart-render path is unaffected by model choice — Plotly does the rendering.
+- **OpenAI free-tier model defaults to `gpt-5.4-mini`.** 2.5M tokens/day on the traffic-share tier. Keep this default while the bot is shared with multiple users — the larger token budget is the binding constraint, not raw model quality. `OPENAI_MODEL=gpt-5.4` is a single-user / dev-time option (250K/day, hits the daily cap much faster with a few active friends). The chart-render path is unaffected by model choice — Plotly does the rendering.
 
 - **README is partially stale.** Architecture diagram still shows Groq (dropped). `/interactive` command is listed but not implemented. Roadmap phases in README don't match current commit history exactly.
 
