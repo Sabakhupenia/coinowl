@@ -20,6 +20,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import anthropic
@@ -1955,11 +1956,112 @@ _OPENAI_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _next_utc_midnight() -> datetime:
+    """Return the next 00:00 UTC after `now`, used as the daily-budget reset point."""
+    now = datetime.now(timezone.utc)
+    tomorrow = now + timedelta(days=1)
+    return tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 class OpenAIProvider:
-    def __init__(self, api_key: str, coingecko: CoinGeckoClient, model: str = _OPENAI_MODEL) -> None:
+    """OpenAI chat provider with multi-model failover and client-side token
+    budget tracking.
+
+    Why client-side budget tracking and not just RateLimitError?
+    On accounts with paid OpenAI credits attached, the API will silently
+    bill paid balance once the free traffic-share tier is exhausted —
+    no RateLimitError, no signal we could fail over on. Tracking tokens
+    ourselves and switching models BEFORE the OpenAI cap is hit is the
+    only way to prevent accidentally burning paid credits.
+
+    State is per-process; counters reset at 00:00 UTC (matching OpenAI's
+    own daily reset).
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        coingecko: CoinGeckoClient,
+        *,
+        models: list[str] | None = None,
+        caps: dict[str, int] | None = None,
+    ) -> None:
         self._client = openai.AsyncOpenAI(api_key=api_key)
         self._cg = coingecko
-        self._model = model
+        self._models: list[str] = list(models) if models else [_OPENAI_MODEL]
+        # Per-model daily token cap. Models not in this dict have no cap and
+        # rely on RateLimitError-only failover.
+        self._caps: dict[str, int] = dict(caps) if caps else {}
+        self._active_idx: int = 0
+        self._exhausted: set[str] = set()
+        self._daily_tokens: dict[str, int] = {m: 0 for m in self._models}
+        self._reset_at: datetime = _next_utc_midnight()
+        # Track which model served the most recent call — exposed via the
+        # `_model` property so existing Agent.reply logging keeps working.
+        self._last_used: str | None = None
+
+    @property
+    def _model(self) -> str:
+        """Currently-active model. Backwards-compat for Agent's winning_model log."""
+        if self._last_used:
+            return self._last_used
+        if self._active_idx < len(self._models):
+            return self._models[self._active_idx]
+        return self._models[-1]
+
+    def status(self) -> dict[str, Any]:
+        """Snapshot of model + budget state for the admin panel."""
+        self._check_reset()
+        return {
+            "models": [
+                {
+                    "name": m,
+                    "tokens_used": self._daily_tokens.get(m, 0),
+                    "cap": self._caps.get(m),
+                    "exhausted": m in self._exhausted,
+                    "active": (
+                        self._active_idx < len(self._models)
+                        and self._models[self._active_idx] == m
+                    ),
+                }
+                for m in self._models
+            ],
+            "reset_at_utc": self._reset_at.isoformat(),
+            "active_index": self._active_idx,
+        }
+
+    def _check_reset(self) -> None:
+        """If we've crossed UTC midnight, clear counters and re-arm all models."""
+        now = datetime.now(timezone.utc)
+        if now >= self._reset_at:
+            log.info(
+                "OpenAI daily budget reset (UTC midnight crossed); re-arming {} model(s)",
+                len(self._models),
+            )
+            self._daily_tokens = {m: 0 for m in self._models}
+            self._exhausted.clear()
+            self._active_idx = 0
+            self._reset_at = _next_utc_midnight()
+
+    def _select_active_model(self) -> str | None:
+        """Advance `_active_idx` past models that are exhausted or over cap.
+        Returns the active model name, or None if all are exhausted."""
+        while self._active_idx < len(self._models):
+            model = self._models[self._active_idx]
+            cap = self._caps.get(model)
+            if model in self._exhausted:
+                self._active_idx += 1
+                continue
+            if cap is not None and self._daily_tokens.get(model, 0) >= cap:
+                log.info(
+                    "OpenAI model {} hit client-side cap ({} >= {} tokens); switching",
+                    model, self._daily_tokens.get(model, 0), cap,
+                )
+                self._exhausted.add(model)
+                self._active_idx += 1
+                continue
+            return model
+        return None
 
     async def chat(
         self,
@@ -1967,6 +2069,42 @@ class OpenAIProvider:
         on_progress: ProgressCallback | None = None,
         uid: int | None = None,
         user_context: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        self._check_reset()
+        last_error: Exception | None = None
+        # Outer loop: keep trying models in order. On RateLimitError from one
+        # model, mark it exhausted and advance. Each _run_model_chat call does
+        # the full tool-iteration conversation with ONE model.
+        while True:
+            active = self._select_active_model()
+            if active is None:
+                # All models capped/exhausted. Let the agent's outer provider
+                # chain fall through to Gemini.
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("All OpenAI models exhausted (client-side cap)")
+            try:
+                self._last_used = active
+                return await self._run_model_chat(
+                    active, user_text, on_progress, uid, user_context
+                )
+            except openai.RateLimitError as exc:
+                log.warning(
+                    "OpenAI model {} hit RateLimitError ({}); advancing fallback chain",
+                    active, exc.__class__.__name__,
+                )
+                self._exhausted.add(active)
+                self._active_idx += 1
+                last_error = exc
+                continue
+
+    async def _run_model_chat(
+        self,
+        model: str,
+        user_text: str,
+        on_progress: ProgressCallback | None,
+        uid: int | None,
+        user_context: str | None,
     ) -> tuple[str, dict[str, Any]]:
         side_effects: dict[str, Any] = {"tool_calls_made": []}
         system_content = (
@@ -1979,18 +2117,23 @@ class OpenAIProvider:
 
         for _ in range(_MAX_TOOL_ITERATIONS):
             stream = await self._client.chat.completions.create(
-                model=self._model,
+                model=model,
                 messages=messages,
                 tools=_OPENAI_TOOLS,
                 max_completion_tokens=_MAX_OUTPUT_TOKENS,
                 stream=True,
+                stream_options={"include_usage": True},
             )
 
             content_parts: list[str] = []
-            # tool_calls accumulate across deltas, keyed by `index`
             tc_acc: dict[int, dict[str, Any]] = {}
             finish_reason: str | None = None
+            usage_total_tokens: int = 0
             async for chunk in stream:
+                # The final streaming chunk carries usage when stream_options
+                # include_usage=True. Choices may be empty on that chunk.
+                if getattr(chunk, "usage", None):
+                    usage_total_tokens = int(chunk.usage.total_tokens or 0)
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -2015,6 +2158,12 @@ class OpenAIProvider:
                             slot["arguments"] += fn.arguments
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
+
+            # Track tokens spent against this model's daily counter
+            if usage_total_tokens > 0:
+                self._daily_tokens[model] = (
+                    self._daily_tokens.get(model, 0) + usage_total_tokens
+                )
 
             if finish_reason != "tool_calls" or not tc_acc:
                 return "".join(content_parts).strip(), side_effects
@@ -2052,7 +2201,7 @@ class OpenAIProvider:
                     }
                 )
 
-        log.warning("OpenAI hit max tool iterations")
+        log.warning("OpenAI hit max tool iterations on {}", model)
         return _max_iter_text(side_effects), side_effects
 
 
@@ -2068,13 +2217,26 @@ class Agent:
         gemini_api_key: str,
         gemini_model: str = _GEMINI_MODEL,
         openai_api_key: str | None,
-        openai_model: str = _OPENAI_MODEL,
+        openai_model: list[str] | str = _OPENAI_MODEL,
+        openai_model_caps: dict[str, int] | None = None,
         anthropic_api_key: str | None,
         coingecko: CoinGeckoClient,
     ) -> None:
+        # Accept either a list (preferred) or single string (backwards-compat).
+        if isinstance(openai_model, str):
+            openai_models = [openai_model]
+        else:
+            openai_models = list(openai_model) if openai_model else [_OPENAI_MODEL]
+        self._openai_models = openai_models
+
         self._gemini = GeminiProvider(gemini_api_key, coingecko, model=gemini_model)
         self._openai: OpenAIProvider | None = (
-            OpenAIProvider(openai_api_key, coingecko, model=openai_model)
+            OpenAIProvider(
+                openai_api_key,
+                coingecko,
+                models=openai_models,
+                caps=openai_model_caps,
+            )
             if openai_api_key
             else None
         )
@@ -2083,19 +2245,34 @@ class Agent:
             if anthropic_api_key
             else None
         )
+        # Classifier and personality use the FIRST model only. Their token cost
+        # is small; if they 429, they have their own Gemini fallback inside.
         self._classifier = TopicClassifier(
             openai_api_key=openai_api_key,
             gemini_api_key=gemini_api_key,
-            openai_model=openai_model,
+            openai_model=openai_models[0],
             gemini_model=gemini_model,
         )
+        self._gemini_model = gemini_model
+        self._claude_enabled = self._claude is not None
         log.info("Gemini model: {}", gemini_model)
         if self._openai is not None:
-            log.info("OpenAI model: {} (primary for non-chart queries)", openai_model)
+            log.info(
+                "OpenAI models (ordered): {} — primary for non-chart queries",
+                ", ".join(openai_models),
+            )
         else:
             log.info("OPENAI_API_KEY not set — routing all queries to Gemini")
         if self._claude is None:
             log.info("ANTHROPIC_API_KEY not set — Claude fallback disabled")
+
+    def provider_status(self) -> dict[str, Any]:
+        """Snapshot of provider/model state for the /admin status panel."""
+        return {
+            "openai": (self._openai.status() if self._openai is not None else None),
+            "gemini_model": self._gemini_model,
+            "claude_enabled": self._claude_enabled,
+        }
 
     def _provider_chain(self, user_text: str) -> list[tuple[str, Any]]:
         """Ordered list of (label, provider) to try for this message."""

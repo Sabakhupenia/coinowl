@@ -33,7 +33,8 @@ python main.py
 | Var | Effect if absent |
 |-----|-----------------|
 | `OPENAI_API_KEY` | All queries route to Gemini (no intent split, no quota relief) |
-| `OPENAI_MODEL` | Defaults to `gpt-5.4-mini` (2.5M tokens/day free) |
+| `OPENAI_MODEL` | Defaults to `gpt-5.4-mini`. Accepts a single model OR a comma-separated ordered fallback list (`gpt-5.4,gpt-5.4-mini`). Client-side token caps per model (see below) trigger failover before OpenAI's free tier is exhausted |
+| `OPENAI_MODEL_CAPS` | Override per-model daily token caps as `key=value,key=value`. Defaults: `gpt-5.4=220000`, `gpt-5.4-mini=2200000` (88% of free tier). Counters reset at 00:00 UTC |
 | `ANTHROPIC_API_KEY` | No last-resort fallback; if both OpenAI and Gemini fail, user sees an error |
 | `COINGECKO_API_KEY` | Free tier (~5 req/min); demo key gives 30 req/min |
 | `ADMIN_TELEGRAM_USER_ID` | `/admin` command is fully disabled. With this set, only that Telegram user_id can invoke it; everyone else gets a silent no-op so the surface stays invisible to other users |
@@ -186,6 +187,8 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - **`OPENAI_API_KEY` is optional but recommended.** Without it, every message routes to Gemini and the per-day RPD limit becomes the bottleneck. With it, only chart-keyword messages hit Gemini.
 
 - **OpenAI free-tier model defaults to `gpt-5.4-mini`.** 2.5M tokens/day on the traffic-share tier. Keep this default while the bot is shared with multiple users — the larger token budget is the binding constraint, not raw model quality. `OPENAI_MODEL=gpt-5.4` is a single-user / dev-time option (250K/day, hits the daily cap much faster with a few active friends). The chart-render path is unaffected by model choice — Plotly does the rendering.
+
+- **`OPENAI_MODEL` accepts a comma-separated fallback chain.** Example `OPENAI_MODEL=gpt-5.4,gpt-5.4-mini` runs gpt-5.4 as primary (better quality) and fails over to gpt-5.4-mini once gpt-5.4's daily client-side cap is hit. Critical billing-safety note: on accounts WITH paid OpenAI credits, exhausting the free tier does NOT raise `RateLimitError` — the API silently bills the paid balance. The `OpenAIProvider` in `coinowl/agent/main.py` tracks tokens client-side via the streamed `usage.total_tokens` field and switches models BEFORE OpenAI's cap is reached. Defaults cap each model at 88% of its known free-tier limit; override with `OPENAI_MODEL_CAPS=key=value,key=value`. Counters reset at 00:00 UTC. Run `/admin status` in Telegram to see current usage / cap / exhaustion / reset countdown.
 
 - **README is partially stale.** Architecture diagram still shows Groq (dropped). `/interactive` command is listed but not implemented. Roadmap phases in README don't match current commit history exactly.
 

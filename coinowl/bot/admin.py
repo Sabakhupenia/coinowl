@@ -7,6 +7,8 @@ explicit subcommand the admin types.
 
 Subcommands:
   /admin                          — show usage
+  /admin status                   — provider/budget snapshot (OpenAI models,
+                                    token usage, reset countdown, fallbacks)
   /admin users [N]                — top N users by last_seen (default 10)
   /admin info <user_id>           — detailed stats for one user
   /admin setlimit <user_id> <N>   — set quota_override (overrides default 10)
@@ -17,6 +19,7 @@ Subcommands:
 from __future__ import annotations
 
 import html as _html
+from datetime import datetime, timezone
 from typing import Any
 
 from coinowl.core.logging import get_logger
@@ -26,9 +29,23 @@ from coinowl.db.pool import pool
 log = get_logger(__name__)
 
 
+# bot/main.py binds the live Agent instance here at startup so `/admin status`
+# can read provider state. Bound via `bind_admin_context(agent=...)`.
+_AGENT: Any = None
+
+
+def bind_admin_context(*, agent: Any) -> None:
+    """Called once by bot/main.py at startup. Lets /admin status read from
+    the live Agent (and any future runtime objects) without dragging the
+    Agent class into this module's import graph."""
+    global _AGENT
+    _AGENT = agent
+
+
 _USAGE = (
     "🦉 <b>Admin panel</b>\n"
     "\n"
+    "<code>/admin status</code> — provider/budget snapshot\n"
     "<code>/admin users [N]</code> — list top N users by last_seen (default 10)\n"
     "<code>/admin info &lt;user_id&gt;</code> — detailed stats for one user\n"
     "<code>/admin setlimit &lt;user_id&gt; &lt;N&gt;</code> — override their 3h quota cap\n"
@@ -48,6 +65,8 @@ async def handle_admin_command(raw_args: str) -> str:
         return _USAGE
     sub = parts[0].lower()
     rest = parts[1:]
+    if sub == "status":
+        return await _status(rest)
     if sub in ("users", "list"):
         return await _users_list(rest)
     if sub == "info":
@@ -59,6 +78,53 @@ async def handle_admin_command(raw_args: str) -> str:
     if sub in ("clearquota", "reset"):
         return await _clear_quota(rest)
     return f"Unknown subcommand: <code>{_esc(sub)}</code>\n\n{_USAGE}"
+
+
+def _fmt_countdown(target: datetime) -> str:
+    delta = target - datetime.now(timezone.utc)
+    secs = max(0, int(delta.total_seconds()))
+    h, secs = divmod(secs, 3600)
+    m, secs = divmod(secs, 60)
+    return f"{h}h {m}m"
+
+
+async def _status(args: list[str]) -> str:
+    if _AGENT is None:
+        return "Agent context not bound — admin status unavailable. Check bot startup logs."
+    snap = _AGENT.provider_status()
+    lines = ["🦉 <b>Bot status</b>"]
+
+    openai = snap.get("openai")
+    if openai is None:
+        lines.append("\nOpenAI: disabled (no API key)")
+    else:
+        lines.append("\n<b>OpenAI models</b> (ordered, today's UTC budget):")
+        for m in openai["models"]:
+            cap = m.get("cap")
+            used = m.get("tokens_used", 0)
+            cap_str = f"{cap:,}" if cap is not None else "no cap"
+            used_str = f"{used:,}"
+            marker = " ← <b>current</b>" if m.get("active") else ""
+            if m.get("exhausted"):
+                marker = " <b>EXHAUSTED</b>"
+            lines.append(
+                f"  • <code>{_esc(m['name'])}</code> — {used_str} / {cap_str} tokens{marker}"
+            )
+        reset_iso = openai.get("reset_at_utc")
+        if reset_iso:
+            try:
+                target = datetime.fromisoformat(reset_iso)
+                lines.append(f"\nReset in: <b>{_fmt_countdown(target)}</b> (UTC midnight)")
+            except ValueError:
+                pass
+
+    lines.append("")
+    lines.append(f"Gemini: <code>{_esc(snap.get('gemini_model'))}</code>")
+    lines.append(
+        "Claude: " + ("enabled" if snap.get("claude_enabled") else "not configured")
+    )
+
+    return "\n".join(lines)
 
 
 async def _users_list(args: list[str]) -> str:

@@ -33,7 +33,7 @@ from coinowl.agent import Agent, AgentResult
 from coinowl.agent.main import wants_chart
 from coinowl.agent.personality import PersonalityWrapper
 from coinowl.agent.prompts import detect_script_language
-from coinowl.bot.admin import handle_admin_command
+from coinowl.bot.admin import bind_admin_context, handle_admin_command
 from coinowl.bot.watcher import BackgroundWatcher, drain_pending_for_user
 from coinowl.core.config import Settings, load_settings
 from coinowl.core.logging import get_logger
@@ -428,16 +428,25 @@ async def _amain() -> None:
             gemini_model=settings.gemini_model,
             openai_api_key=settings.openai_api_key,
             openai_model=settings.openai_model,
+            openai_model_caps=settings.openai_model_caps,
             anthropic_api_key=settings.anthropic_api_key,
             coingecko=cg,
+        )
+        # Personality wrap uses the FIRST model in the OpenAI preference list
+        # (token cost is small; it has its own Gemini fallback if it 429s).
+        personality_openai_model = (
+            settings.openai_model[0] if settings.openai_model else "gpt-5.4-mini"
         )
         personality = PersonalityWrapper(
             openai_api_key=settings.openai_api_key,
             gemini_api_key=settings.gemini_api_key,
-            openai_model=settings.openai_model,
+            openai_model=personality_openai_model,
             gemini_model=settings.gemini_model,
         )
         watcher = BackgroundWatcher(client=client, cg=cg, personality=personality)
+        # Expose the live Agent to the admin module so /admin status can read
+        # provider/budget state. Bound once at startup, never reassigned.
+        bind_admin_context(agent=agent)
         follow_up_store: dict[int, dict] = {}
         last_reply_store: dict[int, str] = {}
         # Per-user list of user messages collected during onboarding. Cleared
