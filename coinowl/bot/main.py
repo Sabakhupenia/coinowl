@@ -32,6 +32,7 @@ from coinowl import __version__
 from coinowl.agent import Agent, AgentResult
 from coinowl.agent.main import wants_chart
 from coinowl.agent.personality import PersonalityWrapper
+from coinowl.agent.prompts import detect_script_language
 from coinowl.bot.admin import handle_admin_command
 from coinowl.bot.watcher import BackgroundWatcher, drain_pending_for_user
 from coinowl.core.config import Settings, load_settings
@@ -704,12 +705,18 @@ async def _amain() -> None:
                 user_context = "\n\n".join(blocks) if blocks else None
             streaming = StreamingReply(event, client)
             await streaming.start()
+            # Brand-new users (still onboarding) have empty preferred_languages
+            # in the DB. Fall back to script-based detection of THIS message so
+            # any refusal that fires comes back in the user's likely language
+            # instead of defaulting to English.
+            db_langs = db_user.get("preferred_languages") or []
+            user_languages = db_langs or detect_script_language(original_text)
             result: AgentResult = await agent.reply(
                 text,
                 on_progress=streaming.on_progress,
                 uid=uid,
                 user_context=user_context,
-                user_languages=db_user.get("preferred_languages"),
+                user_languages=user_languages,
             )
             # Update follow-up context for the next "yes"
             if result.chart_context:

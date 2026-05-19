@@ -8,6 +8,8 @@ language — Georgian, Russian, and English are all expected.
 
 from __future__ import annotations
 
+import re
+
 SYSTEM_PROMPT = """You are CoinOwl 🦉, a Telegram bot that helps users with cryptocurrency statistics.
 
 LANGUAGE
@@ -399,6 +401,26 @@ def _pick_by_lang(table: dict[str, str], languages: list[str] | None) -> str:
 
 def guardrail_refusal(languages: list[str] | None) -> str:
     return _pick_by_lang(_GUARDRAIL_REFUSAL_BY_LANG, languages)
+
+
+_KA_SCRIPT = re.compile(r"[Ⴀ-ჿⴀ-⴯]")  # Mkhedruli + Nuskhuri
+_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+
+
+def detect_script_language(text: str) -> list[str]:
+    """Heuristic fallback for users with no recorded language preference.
+
+    Returns ['ka'] if any Georgian glyph appears in `text`, ['ru'] if Cyrillic,
+    or [] if neither. Used at the bot/main.py call site to give brand-new
+    users a localized refusal even before set_user_profile has run.
+    """
+    if not text:
+        return []
+    if _KA_SCRIPT.search(text):
+        return ["ka"]
+    if _CYRILLIC.search(text):
+        return ["ru"]
+    return []
 
 
 def offtopic_refusal(languages: list[str] | None) -> str:
