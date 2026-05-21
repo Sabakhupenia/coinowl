@@ -344,7 +344,7 @@ def _user_context_block(db_user: dict, *, remaining: int) -> str | None:
         f"Name: {db_user['display_name']}",
         f"Preferred languages: {langs}",
         f"Timezone: {timezone}",
-        f"Quota: {remaining} of 10 messages remaining in the current 3-hour rolling window.",
+        f"Quota: {remaining} of {db_quota.DEFAULT_LIMIT} messages remaining in the current 3-hour rolling window.",
     ]
     if watched:
         parts.append(f"Watchlist: {', '.join(watched)}")
@@ -405,7 +405,7 @@ def _onboarding_wrap(
         "When you have ALL THREE (name, at least one language, at least one coin), "
         "call set_user_profile(name=..., languages=[...], coins=[...]) and confirm "
         "warmly. In that same confirmation reply, ALSO briefly mention:\n"
-        "  • the 10-message / 3-hour-window quota\n"
+        f"  • the {db_quota.DEFAULT_LIMIT}-message / 3-hour-window quota\n"
         "  • that they can chat naturally about crypto (this bot is AI-chat-first),\n"
         "    and that /help, /disclaimer, /price, /version commands exist for "
         "    users who prefer them.\n"
@@ -605,7 +605,7 @@ async def _amain() -> None:
             allowed, remaining = await db_quota.check_and_consume(uid)
             if not allowed:
                 await event.reply(
-                    "You've used all 10 questions for this 3-hour window. "
+                    f"You've used all {db_quota.DEFAULT_LIMIT} questions for this 3-hour window. "
                     "Come back later!"
                 )
                 return

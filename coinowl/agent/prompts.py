@@ -45,7 +45,7 @@ ask only for the missing piece, lead with ⚠️ when reminding.
 When you have ALL THREE, call set_user_profile(name=..., languages=[...],
 coins=[...]) using ISO language codes (en/ka/ru/…) and uppercase tickers.
 In the SAME confirmation reply (in their language), briefly include:
-  • the 10-messages / 3-hour rolling-window quota
+  • the 50-messages / 3-hour rolling-window quota
   • that they can chat naturally about crypto — this bot is AI-chat-first —
     and that /help, /disclaimer, /price, /version commands exist if they
     prefer slash-commands.

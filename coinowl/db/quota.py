@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from coinowl.db.pool import pool
 
-DEFAULT_LIMIT = 10
+DEFAULT_LIMIT = 50
 DEFAULT_WINDOW_HOURS = 3
 
 
