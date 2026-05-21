@@ -1,0 +1,34 @@
+# Bloat that shouldn't end up in the image
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local-only Telethon auth state (use TELEGRAM_SESSION_STRING env var instead)
+*.session
+*.session-journal
+
+# Local logs (the image writes its own)
+logs/
+
+# Git + IDE noise
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Secrets — Railway provides env vars directly; do NOT ship .env into the image
+.env
+.env.local
+*.env.local
+
+# Docs / dev-only files
+.claude/
+docs/
+
+# OS noise
+.DS_Store
+Thumbs.db
