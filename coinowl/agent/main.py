@@ -112,8 +112,19 @@ _MAX_OUTPUT_TOKENS = 2048
 
 # Output guardrail: a deterministic backstop on top of the system prompt's
 # "no predictions / no advice" instruction. Catches obvious leak patterns.
+#
+# The "will reach/hit/go to/be" patterns are split into price-anchored
+# variants so a benign confirmation like "your daily report will hit your
+# inbox at 9am" doesn't trip the prediction refusal. Real price predictions
+# almost always include one of: a "$" sign, a digit + k/m suffix, a
+# comma-separated number (e.g. 80,000), or a price-phrase like "new highs"
+# / "ATH" / "the moon". Layer 2 (LLM-as-judge) catches predictions that
+# slip past these patterns.
 _PREDICTION_PATTERNS = [
-    re.compile(r"\bwill (reach|hit|go to|be)\b", re.IGNORECASE),
+    re.compile(r"\bwill (reach|hit|go to|be)\s+\$", re.IGNORECASE),                    # "will hit $80k"
+    re.compile(r"\bwill (reach|hit|go to|be)\s+\d+\s*[kKmM]\b", re.IGNORECASE),          # "will hit 80k"
+    re.compile(r"\bwill (reach|hit|go to|be)\s+\d{1,3},\d{3}", re.IGNORECASE),           # "will reach 80,000"
+    re.compile(r"\bwill (reach|hit|go to|be)\s+(new\s+(highs?|lows?|ATHs?)|the moon|all[-\s]?time)\b", re.IGNORECASE),
     re.compile(r"\bshould (buy|sell|hold)\b", re.IGNORECASE),
     re.compile(r"\b(i|my)['’]?d? recommend\b", re.IGNORECASE),
     re.compile(r"\bprice target\b", re.IGNORECASE),
