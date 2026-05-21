@@ -388,12 +388,29 @@ def _user_context_block(db_user: dict, *, remaining: int) -> str | None:
     return "\n".join(parts)
 
 
+_ONBOARDING_LANG_LABELS = {
+    "en": "English",
+    "ka": "Georgian (ქართული)",
+    "ru": "Russian (Русский)",
+}
+
+
 def _onboarding_wrap(
     original_text: str,
     *,
     prior_user_messages: list[str] | None = None,
     last_bot_reply: str | None = None,
 ) -> str:
+    # Detect language deterministically from the CURRENT message (not history,
+    # not the bot's previous reply). This is the single source of truth handed
+    # to the LLM — past behavior was to leave detection to the model and it
+    # got confused (e.g. Latin "hi" matched the Georgian "ჰი" example in the
+    # prompt; also when the bot replied in Georgian once, it kept replying in
+    # Georgian even after the user switched to English).
+    detected = detect_script_language(original_text)
+    forced_lang_code = detected[0] if detected else "en"
+    forced_lang_label = _ONBOARDING_LANG_LABELS.get(forced_lang_code, "English")
+
     history_block = ""
     if prior_user_messages and len(prior_user_messages) > 1:
         # all except the current message
@@ -406,6 +423,13 @@ def _onboarding_wrap(
         history_block += f"\n\nYOUR PREVIOUS REPLY: \"{last_bot_reply}\""
     return (
         "<onboarding>\n"
+        f"USER LANGUAGE (forced): {forced_lang_label}. Write your ENTIRE reply "
+        f"in {forced_lang_label}. This is detected from the user's CURRENT "
+        f"message by script. IGNORE the language of any previous bot reply — "
+        f"if your last reply was in a different language but the user has now "
+        f"switched, switch with them. Only technical tokens like 'BTC', 'ETH' "
+        f"stay as-is regardless of language.\n"
+        "\n"
         f"This user is being onboarded. Their latest message: \"{original_text}\"."
         f"{history_block}\n"
         "\n"
@@ -424,15 +448,9 @@ def _onboarding_wrap(
         "\"⚠️ Which language(s) should I use?\" / \"⚠️ Which coins do you want to "
         "track? (e.g. BTC, ETH, SOL — up to 10).\"\n"
         "\n"
-        "LANGUAGE RULE — STRICT: write your reply ENTIRELY in the language of "
-        "the latest message above. If it's in Georgian (ქართული alphabet, e.g. "
-        "\"ჰი\", \"გამარჯობა\"), reply WHOLLY in Georgian — every sentence. Same "
-        "for Russian (Cyrillic). Do NOT mix English explanations into a "
-        "non-English reply. Only technical tokens like 'BTC', 'ETH' stay as-is.\n"
-        "\n"
         "When you have ALL THREE (name, at least one language, at least one coin), "
         "call set_user_profile(name=..., languages=[...], coins=[...]) and confirm "
-        "warmly. In that same confirmation reply, ALSO briefly mention:\n"
+        f"warmly IN {forced_lang_label}. In that same confirmation reply, ALSO briefly mention:\n"
         f"  • the {db_quota.DEFAULT_LIMIT}-message / 3-hour-window quota\n"
         "  • that they can chat naturally about crypto (this bot is AI-chat-first),\n"
         "    and that /help, /disclaimer, /price, /version commands exist for "
