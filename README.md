@@ -158,6 +158,16 @@ cp .env.example .env             # Windows: copy .env.example .env
 | `COINGECKO_API_KEY` | Free public tier is ~5 req/min; demo key gives ~30 req/min. |
 | `ADMIN_TELEGRAM_USER_ID` | Telegram user_id allowed to run `/admin` commands. If unset, `/admin` is fully disabled. |
 
+### One-time chart-renderer setup (kaleido / Chrome)
+
+kaleido ≥1.0 renders Plotly figures via headless Chrome. It doesn't bundle a binary — without Chrome available, every chart tool fails at runtime with "Kaleido requires Google Chrome to be installed." Run this once after `pip install`:
+
+```bash
+python -c "from kaleido import get_chrome_sync; get_chrome_sync()"
+```
+
+That downloads kaleido's preferred Chromium build into the venv (no system-wide Chrome install needed). For Railway / Fly / any nixpacks-based host, the bundled `nixpacks.toml` runs this automatically as part of the build — no manual step required on the host.
+
 ### First run
 
 ```bash

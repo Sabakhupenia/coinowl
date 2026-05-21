@@ -156,6 +156,8 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **kaleido < 1.0 is broken** as of 2026. `kaleido>=1.0` is required (pinned in requirements.txt). kaleido 0.2.x deprecated itself; `fig.to_image()` hangs or fails silently on that version.
 
+- **kaleido ≥1.0 needs a Chrome/Chromium binary** that it doesn't bundle. Without one, every chart tool errors at runtime with "Kaleido requires Google Chrome to be installed." Local fix: `python -c "from kaleido import get_chrome_sync; get_chrome_sync()"` once after `pip install`. Railway / Fly / any nixpacks host: the repo-root `nixpacks.toml` runs this automatically in `phases.build` after `install`. If charts fail in production with the "kaleido requires Chrome" message, the build phase didn't run — check the deploy logs for `get_chrome_sync()` output.
+
 - **kaleido first render** takes 10–20 seconds (starts a headless browser subprocess). Subsequent renders in the same process are fast (~1s). Don't mistake the first slow render for a hang. The sparkline rendered per stats reply doubles render volume — caching is v2/Supabase work.
 
 - **Telegram edit rate limit** is roughly 1 edit per second per message. `StreamingReply` in `bot/main.py` debounces via a single pending task; never call `msg.edit` directly from elsewhere when streaming is active or you'll trip `FloodWait`.
