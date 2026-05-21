@@ -1963,6 +1963,30 @@ def _next_utc_midnight() -> datetime:
     return tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _is_invalid_model_error(exc: openai.BadRequestError) -> bool:
+    """Detect the 'wrong model name / no access to model' family of 400s.
+
+    OpenAI returns BadRequestError for these. The error body's `message` is
+    typically one of: 'invalid model ID', 'The model `X` does not exist',
+    'You do not have access to model `X`', or similar. We match on the
+    intersection of 'model' and an access/existence keyword so we don't
+    accidentally treat e.g. an args-validation 400 as a model issue.
+    """
+    msg = str(exc).lower()
+    if "model" not in msg:
+        return False
+    return any(
+        kw in msg
+        for kw in (
+            "invalid",
+            "does not exist", "doesn't exist", "not exist",
+            "not found", "could not find",
+            "no access", "not have access",  # substring of 'do not have access' / 'does not have access'
+            "unknown",
+        )
+    )
+
+
 class OpenAIProvider:
     """OpenAI chat provider with multi-model failover and client-side token
     budget tracking.
@@ -2097,6 +2121,25 @@ class OpenAIProvider:
                 self._active_idx += 1
                 last_error = exc
                 continue
+            except openai.BadRequestError as exc:
+                # OpenAI 400 with "invalid model ID" / "model not found" /
+                # "no access to model X" is a permanent config issue, not a
+                # rate-limit. Treat the same as exhaustion so the chain
+                # advances to the next model instead of bailing to Gemini and
+                # leaving the configured fallback model untried. Other 400s
+                # (content policy, bad args, etc.) re-raise — they'd hit on
+                # the next model too.
+                if _is_invalid_model_error(exc):
+                    log.warning(
+                        "OpenAI model {} rejected as invalid/inaccessible ({}); "
+                        "advancing fallback chain",
+                        active, str(exc)[:120],
+                    )
+                    self._exhausted.add(active)
+                    self._active_idx += 1
+                    last_error = exc
+                    continue
+                raise
 
     async def _run_model_chat(
         self,
