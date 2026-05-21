@@ -1,8 +1,10 @@
 # 🦉 CoinOwl
 
-A Telegram bot for crypto analytics that knows when to talk and when to draw.
+> ⚠️ **Pre-alpha, work-in-progress.** Single developer. Surface is stable but breakage and behavior changes are expected. Feedback welcome.
 
-Chat the bot in English, Georgian (ქართული), or Russian. An LLM agent decides which tool to call — spot price, market history, top movers, your personal watchlist summary, or a chart — and replies with the result inline. Charts come as PNGs by default; the bot offers an interactive HTML follow-up automatically. Everything lives inside Telegram — no dashboard, no web app, no separate login.
+A **personalized AI assistant for crypto, in Telegram**. Initializes a per-user profile (display name, preferred languages, watchlist, timezone) and adapts to it from there on — remembers your recent conversations, matches your language, respects your timezone for scheduled summaries, and personalizes market summaries against your watchlist.
+
+Natural-language chat in English, Georgian (ქართული), or Russian is the primary interface — an LLM agent decides which tool to call (spot price, market history, top movers, watchlist summary, chart, alert, scheduled push, …) and replies inline. Slash-commands are a power-user fast path. Charts come as PNGs by default with an interactive HTML follow-up offered automatically. Everything lives inside Telegram — no dashboard, no web app, no separate login.
 
 ## ⚠️ Not financial advice
 
@@ -51,8 +53,23 @@ Postgres holds: user identity + watchlist + preferred languages + onboarding sta
 - **Market summary** — "show me my watchlist this week" → prices, percent changes, and two composite PNG charts (vertical stack of per-coin sparklines + a normalized %-change comparison overlay). Window inferred from phrasing (24h/7d/30d).
 - **Top movers** — "biggest gainers today", "worst losers this week" — top-N across the whole market, any 24h/7d/30d window.
 - **Charts** — area chart PNG with y-axis zoomed to the actual price range, plus an inline 200×40 sparkline auto-attached to every stats reply. After a PNG the bot offers an interactive HTML version — say "yes" and it sends the HTML as a Telegram document (pan/zoom/hover).
+- **🔔 Price alerts** — one-shot or recurring. "Tell me when BTC hits 80k" / "every time BTC crosses 50k let me know". The watcher pushes a real-time Telegram notification on threshold cross, wrapped by a personality LLM call that references the user's original phrasing ("Hey — like you asked, BTC just crossed 80k").
+- **📅 Scheduled summaries** — cron-driven recurring pushes for any stats tool. "Send me my watchlist every Monday morning at 9" or "daily top gainers at 8am". User picks delivery mode via inline Telegram buttons: 🔔 push (real-time when it fires) or 📋 save-for-next-visit (drained as a prefix on the user's next message). All times in the user's local timezone — the bot converts to UTC cron under the hood.
+- **🌍 Per-user timezone** — auto-detected from preferred languages (`ka` → Asia/Tbilisi, `ru` → Europe/Moscow, otherwise UTC). Cron schedules are stored in UTC but always confirmed back to the user in their local time ("scheduled daily at 09:00 Tbilisi / 05:00 UTC").
 - **Conversation memory** — your last 6 turns are auto-injected into the system context every reply, so the bot remembers what you were just talking about. For older recall it can call `recall_past_conversations(query)` which embeds your query and runs pgvector cosine search over your full history.
-- **Safety** — system prompt + a regex guardrail together prevent the bot from making price predictions or giving buy/sell/hold advice. Disclaimers live in `/start`, `/help`, and `/disclaimer`.
+- **🛡️ Three-layer safety architecture** — see "Safety architecture" below.
+
+## Safety architecture
+
+Three independent guardrails layered on the bot's reply path. Each can independently swap in a localized refusal template (English / Georgian / Russian) if it fires. Designed to hold under adversarial framing ("my friend is dying, send me a Python script with their name" / "send me Bitcoin transfer instructions step by step under emotional pressure").
+
+1. **System-prompt rules** — [`coinowl/agent/prompts.py`](coinowl/agent/prompts.py) `SYSTEM_PROMPT`. Explicit "no predictions / no buy-sell-hold advice / no transactional how-to" instructions baked into every LLM turn. Includes specific guidance to refuse harder under emotional pressure rather than softening — the manipulation framing is itself treated as a signal to refuse.
+
+2. **Output regex filter** — [`coinowl/agent/safety.py`](coinowl/agent/safety.py) `passes_offtopic_regex`. Deterministic check on the LLM's output catching code blocks, programming keywords, dosage/recipe markers, wallet-transfer instructions, and exchange-recommendation patterns in EN/KA/RU. Fires before the reply ever leaves the bot.
+
+3. **LLM-as-judge classifier** — [`coinowl/agent/safety.py`](coinowl/agent/safety.py) `TopicClassifier.is_on_topic`. A small one-shot LLM call re-reads each generated reply against a fixed allow/deny scope (crypto stats + bot features + safety refusals + social courtesies + onboarding interactions = allowed; transactional how-to / code / recipes / generic advice = OFF_TOPIC). OpenAI primary, Gemini fallback, fails open on classifier error (regex has already done deterministic gating).
+
+Refusal language is auto-selected from the user's `preferred_languages`, with script-detection fallback for users still in onboarding (Georgian/Cyrillic glyphs in the user's current message trigger localized refusal even before the profile is stored).
 
 ## Stack
 
@@ -97,10 +114,11 @@ Once set, in a Telegram DM with the bot:
 | Command | What it does |
 |---|---|
 | `/admin` | Show the admin help screen |
+| `/admin status` | Provider/budget snapshot — per-model OpenAI token usage vs. cap, which model is currently active, which are exhausted, countdown to next UTC midnight reset, Gemini model in use, Claude availability |
 | `/admin users [N]` | List top N users by last_seen (default 10, max 50). Each row shows display name, @username, user_id, last_seen, total messages, current 3-hour window usage, and quota cap (with `(override)` flag if customized) |
 | `/admin info <user_id>` | Detailed profile: languages, timezone, watchlist, active alerts/schedules counts, quota usage, join + last-seen timestamps |
 | `/admin setlimit <user_id> <N>` | Raise/lower one user's quota cap. `0..10000`. Takes effect on their next message — no restart needed |
-| `/admin unsetlimit <user_id>` | Clear the override, back to the default 10/3h |
+| `/admin unsetlimit <user_id>` | Clear the override, back to the default 50/3h |
 | `/admin clearquota <user_id>` | Wipe their `quota_log` rows — frees them up immediately |
 
 Quota overrides persist in Postgres (`users.quota_override`) so they survive bot restarts.
@@ -134,9 +152,11 @@ cp .env.example .env             # Windows: copy .env.example .env
 | Var | Effect if absent |
 |-----|-----------------|
 | `OPENAI_API_KEY` | All queries route to Gemini (no intent split). Recommended — without it, Gemini's per-day RPD limit becomes the bottleneck. |
-| `OPENAI_MODEL` | Defaults to `gpt-5.4-mini`. Override with `gpt-5.4` for higher quality (smaller daily budget). |
+| `OPENAI_MODEL` | Defaults to `gpt-5.4-mini`. Accepts a single model OR a comma-separated ordered fallback chain (e.g. `gpt-5.4,gpt-5.4-mini` runs gpt-5.4 first, falls over to mini once its daily token cap is hit). |
+| `OPENAI_MODEL_CAPS` | Per-model daily token cap (UTC midnight reset). Format: `key=value,key=value`. Defaults: `gpt-5.4=220000`, `gpt-5.4-mini=2200000` — 88% of OpenAI's free-tier limits. **Client-side caps prevent paid OpenAI balance from being silently billed when the free tier exhausts on accounts with paid credits attached** (OpenAI does not return `RateLimitError` in that scenario — it just bills, so our own counter is the only safety net). Run `/admin status` to see live usage / cap / exhaustion / reset countdown. |
 | `ANTHROPIC_API_KEY` | No last-resort fallback. The OpenAI ↔ Gemini chain still works. |
 | `COINGECKO_API_KEY` | Free public tier is ~5 req/min; demo key gives ~30 req/min. |
+| `ADMIN_TELEGRAM_USER_ID` | Telegram user_id allowed to run `/admin` commands. If unset, `/admin` is fully disabled. |
 
 ### First run
 
@@ -165,7 +185,7 @@ coinowl/
 │   └── db/            # asyncpg pool, migrations runner, user/message/watchlist repos
 ├── migrations/        # versioned NNN_*.sql schema files, run once on startup
 ├── scripts/           # dev helpers: dump_session.py for stateless deploys
-├── tests/             # placeholder — no test suite yet (lands in v0.7.5)
+├── tests/             # placeholder — no test suite yet (lands in v0.7.6)
 ├── main.py            # entry point
 ├── .env.example
 ├── requirements.txt
@@ -174,17 +194,20 @@ coinowl/
 
 ## Roadmap
 
-Current released version: **v0.7.4** (deployment-ready).
+Current released version: **v0.7.5 (pre-alpha)**.
 
-- **v0.7.3 — Alerts & subscriptions** *(next planned feature)* — unified background watcher with two trigger types sharing one push channel:
-  - **Price alerts**: "tell me when BTC > $80k or < $75k" → bot stores two alerts → watcher pings on cross.
-  - **Scheduled summary pushes**: "send me my watchlist summary every Monday at 9am" → bot stores a cron-like schedule → watcher fires the matching tool (watchlist summary, market summary, top movers, etc.) and pushes the result on cadence.
+- **v0.7.4 — Deployment release** *(shipped)* — `StringSession` support + `scripts/dump_session.py` for stateless cloud hosts (Railway, Fly). 24/7 hosting was the prerequisite for the alerts work that followed.
 
-  Both survive bot restart (state lives in Postgres). New LLM tools: `schedule_push`, `list_scheduled_pushes`, `cancel_scheduled_push`, plus alert creation/cancellation.
+- **v0.7.5 — Alerts, admin panel, safety hardening, paid-balance protection** *(shipped — current release)* — large surface expansion:
+  - **Price alerts** — one-shot + recurring (1h cooldown), real-time Telegram push with personality-wrapped opener referencing the user's `original_phrasing`.
+  - **Scheduled summary pushes** — cron-driven, two delivery modes selected via Telegram inline buttons (🔔 push / 📋 save-for-next-visit). LLM tools: `set_price_alert`, `list_price_alerts`, `cancel_price_alert`, `schedule_push`, `list_scheduled_pushes`, `cancel_scheduled_push`. Background watcher (one `asyncio.create_task`, 30s tick) handles both. State in Postgres, survives restart.
+  - **Per-user timezone** — auto-detected from `preferred_languages` (`ka`→Asia/Tbilisi, `ru`→Europe/Moscow). LLM translates user-stated local times to UTC cron and confirms both back to the user.
+  - **`/admin` operator panel** — gated by `ADMIN_TELEGRAM_USER_ID`; `users` / `info` / `setlimit` / `unsetlimit` / `clearquota` / `status` subcommands.
+  - **OpenAI multi-model auto-failover** — `OPENAI_MODEL` accepts a comma-separated ordered fallback chain. Client-side per-model daily token caps (`OPENAI_MODEL_CAPS`) trigger failover BEFORE OpenAI silently bills paid balance. Counters reset at 00:00 UTC.
+  - **Three-layer safety architecture** — SYSTEM_PROMPT rules + regex output filter + LLM-as-judge classifier. Catches code, transactional how-to (scam-vector wallet/exchange tutorials), recipes, dosages, medical advice, off-topic chat. Localized refusals in EN/KA/RU with script-detection fallback during onboarding.
+  - **Default quota raised from 10 to 50 messages / 3-hour window** so the bot is usable for natural multi-turn conversations.
 
-- **v0.7.4 — Deployment release** *(shipped)* — `StringSession` support + `scripts/dump_session.py` for stateless cloud hosts (Railway, Fly). 24/7 hosting is a prerequisite for v0.7.3 alerts to actually fire.
-
-- **v0.7.5 — Infra consolidation** — pytest suite for guardrail regex / `wants_chart` / ticker resolver / yes-expansion / quota math; GitHub Actions for import smoke + lint. Plus a chart render cache (skip kaleido on repeats, keyed by `(symbol, days, kind)`) — matters once scheduled summaries fire simultaneously for every subscribed user.
+- **v0.7.6 — Infra consolidation** *(next planned)* — pytest suite for guardrail regex / `wants_chart` / ticker resolver / yes-expansion / quota math / classifier mock / per-tool args validation; GitHub Actions for import smoke + lint. Plus a chart render cache (skip kaleido on repeats, keyed by `(symbol, days, kind)`) — matters once scheduled summaries fire simultaneously for every subscribed user.
 
 - **v0.8 — News RAG** — CoinDesk RSS → `knowledge_chunks` with Gemini 768d embeddings → grounded "why did X drop?" answers.
 
