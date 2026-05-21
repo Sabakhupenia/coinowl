@@ -1,26 +1,25 @@
 # Nixpacks build configuration for Railway / Fly / any Nixpacks-based host.
 #
 # Why this exists:
-#   kaleido >= 1.0 (which we pinned in requirements.txt because 0.2.x is
-#   broken on modern Python) renders Plotly figures via headless Chrome
-#   instead of bundling its own binary like 0.2.x did. Out-of-the-box on
-#   Railway, no Chrome is available — every chart tool fails at runtime
-#   with the literal error message: "Kaleido requires Google Chrome to be
-#   installed."
+#   kaleido >= 1.0 (pinned in requirements.txt because 0.2.x is broken on
+#   modern Python) renders Plotly figures via headless Chromium. It does
+#   NOT bundle a binary. Out-of-the-box on Railway, no Chromium is available
+#   and every chart tool fails at runtime with:
+#       "Kaleido requires Google Chrome to be installed."
 #
-#   The build-phase hook below downloads kaleido's preferred Chromium build
-#   into the venv at deploy time, so chart rendering works at runtime
-#   without needing a system-wide Chrome install or a custom Dockerfile.
+#   Earlier versions of this file tried to download kaleido's preferred
+#   Chromium build during `phases.build`. That was fragile (Python in the
+#   build phase resolved to system Python, not the venv; download cache
+#   didn't always persist to runtime). The reliable fix is to install
+#   Chromium as a NIX SYSTEM PACKAGE — nix keeps it in /nix/store and on
+#   PATH at both build and run time. kaleido's auto-detect (`which chromium`)
+#   finds it without any env-var configuration.
 
-[phases.build]
-# Run after `install` (default Python plugin behavior installs requirements.txt
-# into a venv during `install`). Use the Python API rather than the CLI
-# (`plotly_get_chrome`) so the build doesn't hang waiting for an interactive
-# confirmation prompt on platforms where stdin is a pipe.
-dependsOn = ["install"]
-cmds = [
-  'python -c "from kaleido import get_chrome_sync; get_chrome_sync()"',
-]
+[phases.setup]
+# The "..." literal tells nixpacks to APPEND to the auto-detected base
+# list (Python toolchain, etc.) rather than replace it. Chromium adds
+# ~150 MB to the image but is the most reliable cross-platform option.
+nixPkgs = ["...", "chromium"]
 
 [start]
 cmd = "python main.py"
