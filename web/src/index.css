@@ -215,17 +215,23 @@
 
 @layer base {
   * { @apply border-border outline-ring/50; }
-  html, body, #root { height: 100%; }
-  html { color: var(--foreground); }
-  body {
-    @apply bg-background text-foreground;
-    overflow-x: hidden;
-    background-image: var(--bg-glow);
-    font-family: var(--font-ui);
-    -webkit-font-smoothing: antialiased;
-  }
-  [data-ui="advanced"] body, [data-ui="advanced"] { font-size: 15px; }
 }
+
+/* Unlayered on purpose: host pages (e.g. the claude.ai artifact viewer) set body colour/background with
+   plain CSS, and unlayered rules beat anything inside @layer regardless of order. */
+html, body, #root { height: 100%; }
+html, body {
+  color: var(--foreground);
+  background-color: var(--background);
+}
+body {
+  margin: 0;
+  overflow-x: hidden;
+  background-image: var(--bg-glow);
+  font: 14px/1.5 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+[data-ui="advanced"] body { font-size: 15px; }
 
 @layer components {
   .card-premium {
