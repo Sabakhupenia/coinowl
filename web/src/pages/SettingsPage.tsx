@@ -43,10 +43,10 @@ export function WatchlistEditor() {
   const { t } = useT()
   const wl = useStore(s => s.watchlist)
   const [v, setV] = useState('')
-  const add = (e: FormEvent) => { e.preventDefault(); const s = v.trim().toUpperCase(); if (!s) return; if (wl.length >= 10) { toast('Free holds 10 coins — Pro raises it to 30'); return } if (wl.some(c => c.sym === s)) { toast(s + ' is already on the list'); return } wlApi.add(coinBy(s) ?? makeCoin(s, s, 1, 0.02, 70 + wl.length)); setV(''); toast(s + ' added') }
+  const add = (e: FormEvent) => { e.preventDefault(); const s = v.trim().toUpperCase(); if (!s) return; if (wl.length >= 10) { toast(t('toast.freeCap')); return } if (wl.some(c => c.sym === s)) { toast(t('toast.already', { s })); return } wlApi.add(coinBy(s) ?? makeCoin(s, s, 1, 0.02, 70 + wl.length)); setV(''); toast(t('toast.added', { s })) }
   return (
     <>
-      <div className="flex flex-wrap gap-1.5">{wl.map(c => <span key={c.sym} className="inline-flex items-center gap-1.5 rounded-full border border-gold/30 bg-gold-soft px-2.5 py-1 text-xs font-semibold text-gold-ink">{c.sym}<button aria-label={'Remove ' + c.sym} className="text-base leading-none opacity-60 hover:opacity-100" onClick={() => { const undo = wlApi.remove(c.sym); undoToast(c.sym + ' removed', undo, t('c.undo')) }}>×</button></span>)}<span className="self-center text-xs text-muted-foreground">{wl.length} / 10 {t('set.onFree')}</span></div>
+      <div className="flex flex-wrap gap-1.5">{wl.map(c => <span key={c.sym} className="inline-flex items-center gap-1.5 rounded-full border border-gold/30 bg-gold-soft px-2.5 py-1 text-xs font-semibold text-gold-ink">{c.sym}<button aria-label={'Remove ' + c.sym} className="text-base leading-none opacity-60 hover:opacity-100" onClick={() => { const undo = wlApi.remove(c.sym); undoToast(t('toast.removed', { s: c.sym }), undo, t('c.undo')) }}>×</button></span>)}<span className="self-center text-xs text-muted-foreground">{wl.length} / 10 {t('set.onFree')}</span></div>
       <form onSubmit={add} className="mt-3 flex gap-2"><Input value={v} onChange={e => setV(e.target.value)} placeholder={t('set.addTicker')} className="max-w-[220px] bg-sunken" /><Button type="submit" variant="outline">{t('c.add')}</Button></form>
     </>
   )
@@ -74,7 +74,7 @@ export default function SettingsPage() {
         <Section title={t('set.wl')} hint={t('set.wlHint')}><WatchlistEditor /></Section>
         <Section title={t('set.notif')}>
           <div className="flex items-center justify-between gap-3 border-b border-border py-3"><div><b className="block text-sm">{t('set.tg')}</b><span className="text-xs text-muted-foreground">{t('set.tgD')}</span></div><Badge className="bg-gold-soft text-gold-ink hover:bg-gold-soft">{t('set.connected')}</Badge></div>
-          <div className="flex items-center justify-between gap-3 py-3"><div><b className="block text-sm">{t('set.device')}</b><span className="text-xs text-muted-foreground">{t('set.deviceD')}</span></div><Button size="sm" variant="outline" onClick={() => toast('Your browser will offer “Add to Home Screen” here')}>{t('set.install')}</Button></div>
+          <div className="flex items-center justify-between gap-3 py-3"><div><b className="block text-sm">{t('set.device')}</b><span className="text-xs text-muted-foreground">{t('set.deviceD')}</span></div><Button size="sm" variant="outline" onClick={() => toast(t('toast.install'))}>{t('set.install')}</Button></div>
         </Section>
         <Section title={t('set.appearance')}><Appearance /></Section>
       </div>

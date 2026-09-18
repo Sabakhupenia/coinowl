@@ -39,7 +39,7 @@ export function Instructions() {
   return (
     <>
       <Textarea value={v} onChange={e => setV(e.target.value)} className="min-h-[110px] bg-sunken" />
-      <div className="mt-2 flex items-center gap-3"><span className="text-xs text-muted-foreground">{v.length} / 500</span><Button size="sm" className="btn-gold ml-auto border-0 font-bold" onClick={() => { setInstructions(v); toast('Instructions saved — applied from your next message') }}>{t('c.save')}</Button></div>
+      <div className="mt-2 flex items-center gap-3"><span className="text-xs text-muted-foreground">{v.length} / 500</span><Button size="sm" className="btn-gold ml-auto border-0 font-bold" onClick={() => { setInstructions(v); toast(t('toast.instr')) }}>{t('c.save')}</Button></div>
       <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t('mem.instrNote')}</p>
     </>
   )
@@ -54,7 +54,7 @@ export function History() {
     <>
       <div className="mb-2 flex"><Input value={q} onChange={e => setQ(e.target.value)} placeholder={t('mem.search')} className="ml-auto max-w-[260px] bg-sunken" /></div>
       {history.map(([day, rows]) => { const vis = rows.filter(r => !gone.has(day + r[0]) && (!n || r[1].toLowerCase().includes(n) || r[2].toLowerCase().includes(n))); if (!vis.length) return null; return (
-        <div key={day}><Eyebrow className="mb-1 mt-3">{day}</Eyebrow>{vis.map(r => <div key={r[0]} className="grid grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-2.5 border-b border-border py-1.5 text-[13px]"><span className="font-mono text-xs text-muted-foreground">{r[0]}</span><div className="truncate">{r[1]}  <em className="not-italic text-muted-foreground">→ {r[2]}</em></div><Button size="sm" variant="ghost" className="text-[var(--copper-ink)]" onClick={() => { const key = day + r[0]; setGone(g => new Set(g).add(key)); undoToast('Turn deleted — the bot can no longer recall it', () => setGone(g => { const c = new Set(g); c.delete(key); return c }), t('c.undo')) }}>{t('c.delete')}</Button></div>)}</div>) })}
+        <div key={day}><Eyebrow className="mb-1 mt-3">{day}</Eyebrow>{vis.map(r => <div key={r[0]} className="grid grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-2.5 border-b border-border py-1.5 text-[13px]"><span className="font-mono text-xs text-muted-foreground">{r[0]}</span><div className="truncate">{r[1]}  <em className="not-italic text-muted-foreground">→ {r[2]}</em></div><Button size="sm" variant="ghost" className="text-[var(--copper-ink)]" onClick={() => { const key = day + r[0]; setGone(g => new Set(g).add(key)); undoToast(t('toast.turn'), () => setGone(g => { const c = new Set(g); c.delete(key); return c }), t('c.undo')) }}>{t('c.delete')}</Button></div>)}</div>) })}
     </>
   )
 }
@@ -70,7 +70,7 @@ export default function MemoryPage() {
         <div className="ml-auto flex gap-2"><Button variant="outline">{t('mem.export')}</Button><Button variant="outline" className="text-[var(--copper-ink)]" onClick={() => { const undo = factsApi.clear(); undoToast(t('mem.cleared'), undo, t('c.undo')) }}>{t('mem.forgetAll')}</Button></div>
       </div>
       <div className="grid items-start grid-cols-1 gap-4 xl:grid-cols-2">
-        <Section title={t('mem.facts')} hint="injected into every reply"><FactsList /></Section>
+        <Section title={t('mem.facts')} hint={t('mem.injected')}><FactsList /></Section>
         <Section title={t('mem.instr')} hint={t('mem.instrHint')}><Instructions /></Section>
       </div>
       <Section title={t('mem.history')} hint={t('mem.historyHint')}><History /></Section>

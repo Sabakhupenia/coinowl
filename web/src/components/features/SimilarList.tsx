@@ -32,7 +32,7 @@ export function FeatureVector({ sym }: { sym: string }) {
   const { t } = useT()
   const c = coinBy(sym)!; const f = feats(c); const btc = coinBy('BTC')!
   const rhoB = sym === 'BTC' ? 1 : corr(feats(btc).r, f.r)
-  const rows: [string, number | string, string, number | null][] = [['30-day return', f.ret * 100, '%', 60], ['Daily volatility', f.vol * 100, '%', 6], ['Max drawdown', f.dd * 100, '%', -40], ['Momentum (2nd half vs 1st)', f.mom * 100, '%', 30], ['Correlation to BTC', rhoB, '', 1], ['Cap tier', f.tier, '', null]]
+  const rows: [string, number | string, string, number | null][] = [[t('sim.ret'), f.ret * 100, '%', 60], [t('sim.vol'), f.vol * 100, '%', 6], [t('sim.dd'), f.dd * 100, '%', -40], [t('sim.mom'), f.mom * 100, '%', 30], [t('sim.corr'), rhoB, '', 1], [t('sim.tier'), f.tier, '', null]]
   return (
     <div className="flex flex-col gap-2.5">
       {rows.map(([k, v, u, max]) => (

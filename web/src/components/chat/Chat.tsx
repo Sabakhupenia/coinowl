@@ -12,11 +12,12 @@ import { Input } from '@/components/ui/input'
 import { Tag } from '@/components/ui-bits'
 
 function ChartCard({ sym, range, onOpen }: { sym: string; range: RangeKey; onOpen?: (sym: string) => void }) {
+  const { t } = useT()
   const c = coinBy(sym); if (!c) return null
   const s = pts(c, range).map(p => p.p); const step = Math.max(1, Math.floor(s.length / 60))
   return (
     <div className="mt-2 rounded-xl border border-border bg-sunken px-3 py-2">
-      <div className="mb-1 flex justify-between text-xs font-bold"><span>{c.sym} · {RANGES[range].label}</span>{onOpen && <button className="font-semibold text-gold-ink hover:underline" onClick={() => onOpen(sym)}>Open →</button>}</div>
+      <div className="mb-1 flex justify-between text-xs font-bold"><span>{c.sym} · {RANGES[range].label}</span>{onOpen && <button className="font-semibold text-gold-ink hover:underline" onClick={() => onOpen(sym)}>{t('c.open')} →</button>}</div>
       <Sparkline series={s.filter((_, i) => i % step === 0)} w={420} h={90} neg={s[s.length - 1] < s[0]} />
     </div>
   )
@@ -32,7 +33,7 @@ export function Message({ m, onOpenCoin }: { m: Msg; onOpenCoin?: (sym: string) 
         <div className={cn('rounded-2xl border border-border bg-raised px-3.5 py-2.5 text-sm leading-relaxed', me && 'border-gold/20 bg-gold-soft')}>
           {m.status ? <span className="inline-flex items-center gap-2 text-secondary-foreground"><Loader2 className="size-3.5 animate-spin text-gold" />{m.status}</span> : m.text}
           {m.chart && <ChartCard sym={m.chart.sym} range={m.chart.range} onOpen={onOpenCoin} />}
-          {m.attribution && <span className="mt-2 block text-[11px] text-muted-foreground">Data: CoinGecko</span>}
+          {m.attribution && <span className="mt-2 block text-[11px] text-muted-foreground">{t('chat.data')}</span>}
         </div>
         {m.used && <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">{t('chat.used')}:{m.used.map(u => <Tag key={u}>{u}</Tag>)}</div>}
       </div>

@@ -23,7 +23,7 @@ export function AlertRow({ a }: { a: Alert }) {
     <div className="grid grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3.5 border-b border-border py-3 last:border-0 md:grid-cols-[44px_minmax(0,1.5fr)_minmax(0,1.6fr)_auto_auto]">
       <div className={cn('grid size-[42px] place-items-center rounded-xl border border-border bg-raised text-[17px]', a.state === 'armed' && 'border-gold/25 bg-gold-soft', a.state === 'triggered' && 'bg-[var(--copper-soft)]')}>{a.state === 'triggered' ? '✓' : a.state === 'paused' ? '⏸' : '🔔'}</div>
       <div>
-        <b className="block text-sm">{a.sym} {a.dir} {fmtUSD(a.price)}</b>
+        <b className="block text-sm">{t('al.line', { s: a.sym, d: t(a.dir === 'above' ? 'omni.above' : 'omni.below'), p: fmtUSD(a.price) })}</b>
         <span className="block text-xs text-muted-foreground">{a.state === 'triggered' ? `${t('al.fired')} ${a.fired} · ${t('al.off')}` : `${a.when} · ${a.rec ? t('al.rec') : t('al.oneShot')} · ${t('al.now')} ${fmtUSD(c.price)}`}</span>
         {a.state !== 'triggered' && <div className="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground"><span>{fmtPct(dist)} {t('al.away')}</span><div className="h-1.5 w-40 overflow-hidden rounded-full bg-sunken"><i className="block h-full rounded-full bg-gold" style={{ width: prog + '%' }} /></div></div>}
       </div>
@@ -45,9 +45,9 @@ export function AlertForm({ defaultSym }: { defaultSym?: string }) {
   const [sym, setSym] = useState(defaultSym ?? 'BTC'); const [dir, setDir] = useState<'above' | 'below'>('above'); const [price, setPrice] = useState(''); const [rec, setRec] = useState(false)
   const arm = () => {
     const p = parseFloat(price.replace(/[,k]/gi, m => (m.toLowerCase() === 'k' ? '000' : '')))
-    if (!p) { toast('Enter a price first'); return }
+    if (!p) { toast(t('toast.price')); return }
     const undo = alerts.add({ sym, dir, price: p, rec, state: 'armed', said: `${sym} ${dir} ${p} (set here)`, when: 'today' })
-    setPrice(''); undoToast(t('toast.armed', { s: sym, d: dir, p: fmtUSD(p) }), undo, t('c.undo'))
+    setPrice(''); undoToast(t('toast.armed', { s: sym, d: t(dir === 'above' ? 'omni.above' : 'omni.below'), p: fmtUSD(p) }), undo, t('c.undo'))
   }
   const options = [...wl, ...UNIVERSE.filter(c => !wl.some(w => w.sym === c.sym))]
   return (

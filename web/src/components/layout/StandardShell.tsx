@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Bell, Brain, CreditCard, LayoutGrid, MessageSquare, MoreHorizontal, Newspaper, Settings, Sparkles } from 'lucide-react'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import { useStore } from '@/lib/store'
+import { fmtToday } from '@/lib/format'
 import { useRoute } from '@/lib/router'
 import { useT, type Key } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
@@ -23,8 +24,9 @@ const NAV: { id: string; k: Key; Icon: typeof LayoutGrid }[] = [
 const PAGES: Record<string, () => React.JSX.Element> = { dashboard: Dashboard, chat: ChatPage, news: NewsPage, similar: SimilarPage, alerts: AlertsPage, memory: MemoryPage, settings: SettingsPage, plan: PlanPage }
 
 export function StandardShell({ onSignOut }: { onSignOut: () => void }) {
-  const { t } = useT()
+  const { t, lang } = useT()
   const { path } = useRoute()
+  const today = fmtToday(lang)
   const page = PAGES[path] ? path : 'dashboard'
   const Page = PAGES[page]
   const armed = useStore(s => s.alerts).filter(a => a.state === 'armed').length
@@ -44,19 +46,19 @@ export function StandardShell({ onSignOut }: { onSignOut: () => void }) {
               {id === 'alerts' && armed > 0 && <span className="hidden rounded-full border border-border bg-raised px-2 text-[11px] md:ml-auto md:inline">{armed}</span>}
             </a>
           ))}
-          <button onClick={() => setMore(true)} className={cn('flex flex-col items-center gap-0.5 rounded-lg px-1 py-1.5 text-[10px] font-bold text-secondary-foreground md:hidden', NAV.slice(4).some(n => n.id === page) && 'bg-gold-soft text-gold-ink')}><MoreHorizontal className="size-[18px]" />More</button>
+          <button onClick={() => setMore(true)} className={cn('flex flex-col items-center gap-0.5 rounded-lg px-1 py-1.5 text-[10px] font-bold text-secondary-foreground md:hidden', NAV.slice(4).some(n => n.id === page) && 'bg-gold-soft text-gold-ink')}><MoreHorizontal className="size-[18px]" />{t('nav.more')}</button>
         </nav>
         <Sheet open={more} onOpenChange={setMore}>
           <SheetContent side="bottom" className="rounded-t-2xl pb-[calc(16px+env(safe-area-inset-bottom,0px))]">
-            <SheetTitle className="mb-2 text-sm text-muted-foreground">More</SheetTitle>
+            <SheetTitle className="mb-2 text-sm text-muted-foreground">{t('nav.more')}</SheetTitle>
             <div className="grid grid-cols-2 gap-2">{NAV.slice(4).map(({ id, k, Icon }) => <a key={id} href={'#' + id} onClick={() => setMore(false)} className={cn('flex items-center gap-3 rounded-xl border border-border px-3 py-3 text-sm font-semibold', page === id && 'border-gold/30 bg-gold-soft text-gold-ink')}><Icon className="size-[18px]" />{t(k)}</a>)}</div>
           </SheetContent>
         </Sheet>
-        <div className="mt-auto hidden border-t border-border px-2.5 pt-4 text-xs leading-relaxed text-muted-foreground md:block"><div className="flex items-center gap-2 font-bold text-secondary-foreground"><span className="size-2 rounded-full bg-gold shadow-[0_0_10px_var(--gold)]" />Bot connected</div>@CoinOwlBot · last message 12 min ago<br />{t('c.dataSource')}</div>
+        <div className="mt-auto hidden border-t border-border px-2.5 pt-4 text-xs leading-relaxed text-muted-foreground md:block"><div className="flex items-center gap-2 font-bold text-secondary-foreground"><span className="size-2 rounded-full bg-gold shadow-[0_0_10px_var(--gold)]" />{t('rail.bot')}</div>{t('rail.last')}<br />{t('c.dataSource')}</div>
       </aside>
       <main className="min-w-0 px-4 pb-24 md:px-8 md:pb-12">
         <header className="sticky top-0 z-10 -mx-4 mb-4 flex flex-wrap items-center gap-3 border-b border-border px-4 py-3.5 glass md:-mx-8 md:gap-4 md:px-8">
-          <div className="min-w-0"><h1 className="display text-2xl font-medium leading-tight md:text-[30px]">{t(('nav.' + page) as Key)}</h1><p className="display-italic hidden text-[14.5px] text-secondary-foreground md:block">{t(('sub.' + page) as Key)}</p></div>
+          <div className="min-w-0"><h1 className="display text-2xl font-medium leading-tight md:text-[30px]">{t(('nav.' + page) as Key)}</h1><p className="display-italic hidden text-[14.5px] text-secondary-foreground md:block">{t(('sub.' + page) as Key)}{page === 'dashboard' && <span className="ml-2 text-gold-ink">{today}</span>}</p></div>
           <div className="order-last w-full md:order-0 md:ml-auto md:w-auto md:max-w-[440px] md:flex-1"><Omnibox mode="standard" /></div>
           <span className="hidden rounded-full border border-border bg-raised px-2.5 py-0.5 text-[11.5px] font-bold text-secondary-foreground lg:inline" title="This preview uses generated numbers, not live CoinGecko data">{t('c.sample')}</span>
           <TopControls onSignOut={onSignOut} />

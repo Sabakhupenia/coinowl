@@ -34,7 +34,7 @@ function Shell() {
     if (effectiveUi === 'standard' && path === 'coin') navigate('dashboard')
   }, [effectiveUi, path])
   useEffect(() => { if (ui === 'advanced' && !wide) toast(t('mode.narrow'), { id: 'narrow' }) }, [ui, wide, t])
-  if (!signedIn) return <Login onIn={() => { setSignedIn(true); toast('Signed in as Saba via Telegram') }} />
+  if (!signedIn) return <Login onIn={() => { setSignedIn(true); toast(t('toast.signed', { n: 'Saba' })) }} />
   return effectiveUi === 'advanced' ? <AdvancedShell onSignOut={() => setSignedIn(false)} /> : <StandardShell onSignOut={() => setSignedIn(false)} />
 }
 

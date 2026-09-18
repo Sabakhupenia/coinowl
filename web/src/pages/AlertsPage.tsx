@@ -17,12 +17,12 @@ export function SchedulesList() {
       {sched.map(s => (
         <div key={s.id} className="grid grid-cols-1 gap-3.5 border-b border-border py-3.5 last:border-0 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.5fr)_auto] md:items-center">
           <div><b className="block text-sm">{s.title}</b><span className="block text-xs text-muted-foreground">{s.when} ({s.tz}) · {t('sc.next')} {s.next}</span><Tag className="mt-1">{s.tool}</Tag><div className="display-italic mt-1.5 border-l-2 border-gold pl-2.5 text-[13px] text-secondary-foreground">“{s.said}”</div></div>
-          <RadioGroup value={s.mode} onValueChange={v => { schedApi.patch(s.id, { mode: v as 'notify' | 'save' }); toast(v === 'notify' ? 'Will ping you in Telegram' : 'Will wait for your next visit') }} className="gap-1.5">
+          <RadioGroup value={s.mode} onValueChange={v => { schedApi.patch(s.id, { mode: v as 'notify' | 'save' }); toast(v === 'notify' ? t('toast.notify') : t('toast.wait')) }} className="gap-1.5">
             {([['notify', t('sc.notify'), t('sc.notifyD')], ['save', t('sc.save'), t('sc.saveD')]] as const).map(([m, l, d]) => (
               <label key={m} className={cn('grid cursor-pointer grid-cols-[20px_1fr] items-start gap-x-2.5 rounded-lg border border-border px-3 py-2', s.mode === m && 'border-gold/40 bg-gold-soft')}><RadioGroupItem value={m} className="mt-0.5" /><span><b className="block text-[13px]">{l}</b><span className="block text-xs text-muted-foreground">{d}</span></span></label>
             ))}
           </RadioGroup>
-          <Button size="sm" variant="ghost" className="justify-self-start text-[var(--copper-ink)] md:justify-self-auto" onClick={() => { const undo = schedApi.remove(s.id); undoToast('Schedule removed', undo, t('c.undo')) }}>{t('c.delete')}</Button>
+          <Button size="sm" variant="ghost" className="justify-self-start text-[var(--copper-ink)] md:justify-self-auto" onClick={() => { const undo = schedApi.remove(s.id); undoToast(t('toast.schedRemoved'), undo, t('c.undo')) }}>{t('c.delete')}</Button>
         </div>
       ))}
     </div>

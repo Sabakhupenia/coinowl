@@ -28,21 +28,22 @@ export function parseIntents(q: string, mode: 'standard' | 'advanced', t: TFn): 
   }
   if ((m = U.match(new RegExp('^(?:SHOW |OPEN |CHART )?' + TICK + '(?:\\s+(24H|7D|30D|90D|1Y))?$'))) && coinBy(norm(m[1]))) {
     const sym = norm(m[1]); const r = m[2]?.toLowerCase() as RangeKey | undefined
-    out.push({ id: 'coin', label: `Open ${sym}${r ? ' · ' + r : ''}`, run: () => { openCoin(sym, r && RANGE_KEYS.includes(r) ? r : undefined); toast(t('toast.charting', { s: sym, r: r ?? '' })) } })
+    out.push({ id: 'coin', label: t('omni.open', { s: sym + (r ? ' · ' + r : '') }), run: () => { openCoin(sym, r && RANGE_KEYS.includes(r) ? r : undefined); toast(t('toast.charting', { s: sym, r: r ?? '' })) } })
   }
   if ((m = U.match(new RegExp('^COMPARE\\s+' + TICK + '(?:\\s+(?:AND|VS|,)?\\s*' + TICK + ')+')))) {
     const syms = [...U.matchAll(new RegExp(TICK, 'g'))].map(x => norm(x[1])).filter(s => getState().watchlist.some(c => c.sym === s)).slice(0, 5)
-    if (syms.length > 1) out.push({ id: 'cmp', label: 'Compare ' + syms.join(' vs '), run: () => { compareWith(syms[0], syms[1]); setView({ compare: syms }); navigate(mode === 'advanced' ? 'coin/' + syms[0] : 'dashboard') } })
+    if (syms.length > 1) out.push({ id: 'cmp', label: t('omni.compare', { s: syms.join(' vs ') }), run: () => { compareWith(syms[0], syms[1]); setView({ compare: syms }); navigate(mode === 'advanced' ? 'coin/' + syms[0] : 'dashboard') } })
   }
   if ((m = U.match(new RegExp('^(?:ALERT|NOTIFY|TELL ME WHEN)\\s+' + TICK + '\\s*(ABOVE|BELOW|OVER|UNDER|>|<|HITS|REACHES)\\s*\\$?([\\d.,]+)\\s*(K)?')))) {
     const price = parseFloat(m[3].replace(/,/g, '')) * (m[4] ? 1000 : 1); const dir = /BELOW|UNDER|</.test(m[2]) ? 'below' : 'above'; const sym = norm(m[1])
-    out.push({ id: 'alert', label: `Arm alert: ${sym} ${dir} ${fmtUSD(price)}`, sub: 'pushes to Telegram when it crosses', run: () => { const undo = alerts.add({ sym, dir, price, rec: false, state: 'armed', said: Q, when: 'today' }); undoToast(`Armed: ${sym} ${dir} ${fmtUSD(price)}`, undo, 'Undo') } })
+    const label = t('omni.arm', { l: t('al.line', { s: sym, d: t(dir === 'above' ? 'omni.above' : 'omni.below'), p: fmtUSD(price) }) })
+    out.push({ id: 'alert', label, sub: t('omni.armSub'), run: () => { const undo = alerts.add({ sym, dir, price, rec: false, state: 'armed', said: Q, when: 'today' }); undoToast(label, undo, t('c.undo')) } })
   }
-  if ((m = U.match(new RegExp('^(?:WHY|NEWS|WHAT HAPPENED).*?' + TICK)))) { const sym = norm(m[1]); out.push({ id: 'news', label: `Why did ${sym} move? · grounded answer`, run: () => openCoin(sym, undefined, 'news') }) }
-  if ((m = U.match(new RegExp('^(?:SIMILAR|LIKE)\\s+(?:TO\\s+)?' + TICK)))) { const sym = norm(m[1]); out.push({ id: 'sim', label: `Coins similar to ${sym}`, run: () => openCoin(sym, undefined, 'similar') }) }
+  if ((m = U.match(new RegExp('^(?:WHY|NEWS|WHAT HAPPENED).*?' + TICK)))) { const sym = norm(m[1]); out.push({ id: 'news', label: t('omni.why', { s: sym }), run: () => openCoin(sym, undefined, 'news') }) }
+  if ((m = U.match(new RegExp('^(?:SIMILAR|LIKE)\\s+(?:TO\\s+)?' + TICK)))) { const sym = norm(m[1]); out.push({ id: 'sim', label: t('omni.similar', { s: sym }), run: () => openCoin(sym, undefined, 'similar') }) }
   const pages: Record<string, string> = { ALERTS: 'alerts', SCHEDULES: 'alerts', INBOX: 'alerts', MEMORY: 'memory', SETTINGS: 'settings', ACCOUNT: 'settings', PLAN: 'plan', NEWS: 'news', SIMILAR: 'similar', DASHBOARD: 'dashboard', CHAT: 'chat' }
-  if (pages[U]) out.push({ id: 'go', label: 'Go to ' + pages[U], run: () => navigate(pages[U]) })
-  out.push({ id: 'ask', label: `Ask the agent: “${Q}”`, sub: 'natural language, same as Telegram', run: () => { send(Q); if (mode === 'standard') navigate('chat') } })
+  if (pages[U]) out.push({ id: 'go', label: t('omni.go', { s: t(('nav.' + pages[U]) as Key) }), run: () => navigate(pages[U]) })
+  out.push({ id: 'ask', label: t('omni.ask', { q: Q }), sub: t('omni.askSub'), run: () => { send(Q); if (mode === 'standard') navigate('chat') } })
   return out
 }
 

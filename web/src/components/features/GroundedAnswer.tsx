@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
-import { answerFor, type Answer } from '@/lib/mock'
+import { answerFor } from '@/lib/mock'
+import { SAMPLE, type Answer } from '@/lib/sample'
 import { useT } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -7,11 +8,11 @@ import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 
 export function GroundedAnswer({ initial }: { initial: string }) {
-  const { t } = useT()
+  const { t, lang } = useT()
   const [q, setQ] = useState(initial)
-  const [res, setRes] = useState(() => answerFor(initial))
+  const [res, setRes] = useState(() => answerFor(initial, SAMPLE[lang].answers))
   const [hot, setHot] = useState<number | null>(null)
-  const ask = (e: FormEvent) => { e.preventDefault(); setRes(answerFor(q)) }
+  const ask = (e: FormEvent) => { e.preventDefault(); setRes(answerFor(q, SAMPLE[lang].answers)) }
   return (
     <div>
       <form onSubmit={ask} className="mb-4 flex gap-2">
@@ -48,12 +49,12 @@ function AnswerBody({ a, hot, setHot }: { a: Answer; hot: number | null; setHot:
             <div className="grid size-[26px] place-items-center rounded-md border border-border bg-raised font-mono text-[11.5px] font-bold text-gold-ink">{i + 1}</div>
             <div>
               <b className="block text-[13.5px] leading-snug">{x.t}</b>
-              <div className="mt-0.5 text-[11.5px] text-muted-foreground"><span className="text-secondary-foreground">CoinDesk</span> · {x.w} · chunk 2 of 5</div>
+              <div className="mt-0.5 text-[11.5px] text-muted-foreground"><span className="text-secondary-foreground">CoinDesk</span> · {x.w} · {t('news.chunk')}</div>
               <q className="mt-1.5 block text-[12.5px] leading-normal text-secondary-foreground [&_mark]:rounded-sm [&_mark]:bg-gold-soft [&_mark]:px-0.5 [&_mark]:text-gold-ink" dangerouslySetInnerHTML={{ __html: x.q }} />
             </div>
             <div className="hidden text-right text-[11px] text-muted-foreground md:block">
               <b className="mb-1.5 block font-mono text-sm font-semibold text-foreground">{x.sc.toFixed(2)}</b>
-              <Progress value={x.sc * 100} className="h-1.5 bg-gold-soft [&>div]:bg-gold" />cosine
+              <Progress value={x.sc * 100} className="h-1.5 bg-gold-soft [&>div]:bg-gold" />{t('news.cosine')}
             </div>
           </div>
         ))}

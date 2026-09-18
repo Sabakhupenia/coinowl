@@ -13,9 +13,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 
 const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)']
 
+export const fngWord = (v: number, t: (k: 'fng.0' | 'fng.1' | 'fng.2' | 'fng.3' | 'fng.4') => string) => v < 25 ? t('fng.0') : v < 45 ? t('fng.1') : v < 56 ? t('fng.2') : v < 76 ? t('fng.3') : t('fng.4')
 export function FngTile({ compact }: { compact?: boolean }) {
   const { t } = useT(); const v = FNG.today
-  const word = v < 25 ? t('fng.0') : v < 45 ? t('fng.1') : v < 56 ? t('fng.2') : v < 76 ? t('fng.3') : t('fng.4')
+  const word = fngWord(v, t)
   return (
     <div className={cn('card-premium flex flex-col gap-1.5 p-5', !compact && 'md:col-span-2 xl:col-span-1', 'border-gold/20')} style={{ boxShadow: 'inset 0 1px 0 var(--edge), var(--shadow-1), var(--gold-glow)' }}>
       <div className="text-xs font-semibold text-secondary-foreground">{t('dash.fng')}</div>
@@ -24,7 +25,7 @@ export function FngTile({ compact }: { compact?: boolean }) {
         {[['var(--copper)', 1], ['var(--copper)', 0.55], ['var(--muted-foreground)', 0.6], ['var(--gold)', 0.55], ['var(--gold)', 1]].map(([c, o], i) => <i key={i} className={cn('flex-1', i === 0 && 'rounded-l-full', i === 4 && 'rounded-r-full')} style={{ background: c as string, opacity: o as number }} />)}
         <span className="absolute -top-1.5 size-[22px] -translate-x-1/2 rounded-full border-[3px] border-card" style={{ left: v + '%', background: 'var(--gold-grad)', boxShadow: '0 0 0 1px rgba(212,175,55,.6), var(--gold-glow)' }} />
       </div>
-      <div className="mt-2 flex justify-between text-[10.5px] font-bold text-muted-foreground"><span>{t('fng.0')}</span><span className="max-sm:hidden">{t('fng.1')}</span><span>{t('fng.2')}</span><span className="max-sm:hidden">{t('fng.3')}</span><span>{t('fng.4')}</span></div>
+      <div className="mt-2 flex justify-between text-[10.5px] font-bold text-muted-foreground"><span>{t('fng.0')}</span><span className="hidden 2xl:inline">{t('fng.1')}</span><span>{t('fng.2')}</span><span className="hidden 2xl:inline">{t('fng.3')}</span><span>{t('fng.4')}</span></div>
       <div className="mt-2 flex gap-5 text-xs text-secondary-foreground"><span>{t('dash.yesterday')} <b className="text-foreground">{FNG.yesterday}</b></span><span>{t('dash.7d')} <b className="text-foreground">{FNG.week}</b></span><span>{t('dash.30d')} <b className="text-foreground">{FNG.month}</b></span></div>
     </div>
   )
@@ -65,8 +66,8 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[2fr_1fr_1fr_1fr]">
         <FngTile />
         <div className="card-premium flex flex-col gap-1.5 p-5"><div className="text-xs font-semibold text-secondary-foreground">{t('dash.wl')} · {view.range}</div><div className={cn('text-[32px] font-bold leading-none tracking-tighter', avg >= 0 ? 't-up' : 't-down')}>{fmtPct(avg)}</div><div className="text-xs font-semibold text-muted-foreground">{up} {t('dash.coinsUp', { n: wl.length })}</div></div>
-        <div className="card-premium flex flex-col gap-1.5 p-5"><div className="text-xs font-semibold text-secondary-foreground">{t('dash.armed')}</div><div className="text-[32px] font-bold leading-none tracking-tighter">{alertsArmed}</div><div className="text-xs font-semibold text-muted-foreground">1 triggered this week · SOL &gt; $250</div></div>
-        <div className="card-premium flex flex-col gap-1.5 p-5"><div className="text-xs font-semibold text-secondary-foreground">{t('dash.next')}</div><div className="pt-1 text-[22px] font-bold leading-none tracking-tight">Tomorrow 09:00</div><div className="text-xs font-semibold text-muted-foreground">{t('dash.nextSub')}</div></div>
+        <div className="card-premium flex flex-col gap-1.5 p-5"><div className="text-xs font-semibold text-secondary-foreground">{t('dash.armed')}</div><div className="text-[32px] font-bold leading-none tracking-tighter">{alertsArmed}</div><div className="text-xs font-semibold text-muted-foreground">{t('dash.triggered')}</div></div>
+        <div className="card-premium flex flex-col gap-1.5 p-5"><div className="text-xs font-semibold text-secondary-foreground">{t('dash.next')}</div><div className="pt-1 text-[22px] font-bold leading-none tracking-tight">{t('dash.tomorrow')}</div><div className="text-xs font-semibold text-muted-foreground">{t('dash.nextSub')}</div></div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[5fr_7fr]">
@@ -84,11 +85,11 @@ export default function Dashboard() {
             </TableBody>
           </Table>
         </Section>
-        <Section title={view.mode === 'compare' ? `${t('c.compare')} · %` : coin.name} hint={view.mode === 'compare' ? `${view.compare.join(' · ')} · indexed to 0` : `${coin.sym} · ${view.range}`} right={<span className="text-xs text-muted-foreground">{t('c.hover')}</span>} className="flex flex-col">
+        <Section title={view.mode === 'compare' ? `${t('c.compare')} · %` : coin.name} hint={view.mode === 'compare' ? `${view.compare.join(' · ')} · ${t('c.indexed')}` : `${coin.sym} · ${view.range}`} right={<span className="text-xs text-muted-foreground">{t('c.hover')}</span>} className="flex flex-col">
           {view.mode !== 'compare' && <div className="mb-3 flex flex-wrap items-baseline gap-3.5"><span className="text-[34px] font-extrabold tracking-tighter tnum">{fmtUSD(coin.price)}</span><Delta v={pct(coin, view.range)} suffix={view.range} className="text-sm" /><span className="ml-auto text-[11.5px] text-muted-foreground">{t('c.dataSource')}</span></div>}
-          {view.mode === 'compare' && <div className="mb-3 flex flex-wrap gap-1.5">{view.compare.map((s, i) => { const c = coinBy(s)!; return <button key={s} onClick={() => toggleHidden(s)} className={cn('inline-flex items-center gap-1.5 rounded-full border border-input bg-card px-2.5 py-1 text-xs font-semibold', hidden.has(s) && 'opacity-45')}><i className="inline-block h-[3px] w-3.5 rounded" style={{ background: SERIES[i] }} />{s} <Delta v={pct(c, view.range)} /></button> })}<span className="self-center text-xs text-muted-foreground">· {t('dash.wlHint')} (max 5)</span></div>}
+          {view.mode === 'compare' && <div className="mb-3 flex flex-wrap gap-1.5">{view.compare.map((s, i) => { const c = coinBy(s)!; return <button key={s} onClick={() => toggleHidden(s)} className={cn('inline-flex items-center gap-1.5 rounded-full border border-input bg-card px-2.5 py-1 text-xs font-semibold', hidden.has(s) && 'opacity-45')}><i className="inline-block h-[3px] w-3.5 rounded" style={{ background: SERIES[i] }} />{s} <Delta v={pct(c, view.range)} /></button> })}<span className="self-center text-xs text-muted-foreground">· {t('dash.wlHint')} · {t('coin.max5')}</span></div>}
           {view.mode === 'table'
-            ? <div className="max-h-[340px] overflow-auto"><Table className="text-xs"><TableHeader><TableRow><TableHead>Time</TableHead><TableHead className="text-right">{t('c.price')}</TableHead><TableHead className="text-right">vs start</TableHead></TableRow></TableHeader><TableBody>{(() => { const p = pts(coin, view.range); const step = Math.max(1, Math.floor(p.length / 40)); const rows = []; for (let i = p.length - 1; i >= 0; i -= step) { const v = (p[i].p / p[0].p - 1) * 100; rows.push(<TableRow key={i}><TableCell>{fmtDate(p[i].t, view.range)}</TableCell><TableCell className="text-right font-mono tnum">{fmtUSD(p[i].p)}</TableCell><TableCell className={cn('text-right font-mono tnum', v >= 0 ? 't-up' : 't-down')}>{fmtPct(v)}</TableCell></TableRow>) } return rows })()}</TableBody></Table></div>
+            ? <div className="max-h-[340px] overflow-auto"><Table className="text-xs"><TableHeader><TableRow><TableHead>{t('c.time')}</TableHead><TableHead className="text-right">{t('c.price')}</TableHead><TableHead className="text-right">{t('c.vsStart')}</TableHead></TableRow></TableHeader><TableBody>{(() => { const p = pts(coin, view.range); const step = Math.max(1, Math.floor(p.length / 40)); const rows = []; for (let i = p.length - 1; i >= 0; i -= step) { const v = (p[i].p / p[0].p - 1) * 100; rows.push(<TableRow key={i}><TableCell>{fmtDate(p[i].t, view.range)}</TableCell><TableCell className="text-right font-mono tnum">{fmtUSD(p[i].p)}</TableCell><TableCell className={cn('text-right font-mono tnum', v >= 0 ? 't-up' : 't-down')}>{fmtPct(v)}</TableCell></TableRow>) } return rows })()}</TableBody></Table></div>
             : <div className="min-h-[340px] flex-1"><PriceChart coins={chartCoins} range={view.range} height={360} hidden={hidden} /></div>}
         </Section>
       </div>
