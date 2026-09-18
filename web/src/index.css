@@ -5,6 +5,7 @@
 
 /* ---------- Standard mode: CoinOwl gold-on-navy (V2). Dark is the brand default. ---------- */
 :root {
+  color-scheme: light;
   --radius: 0.75rem;
   --background: #f3ebd8;
   --foreground: #0a0a1a;
@@ -53,6 +54,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: #07071a;
   --foreground: #f5e6c8;
   --card: #10102a;
@@ -94,6 +96,7 @@
 
 /* ---------- Advanced mode: workbench (V3). Light-first, conventional polarity. ---------- */
 [data-ui="advanced"] {
+  color-scheme: light;
   --radius: 0.5rem;
   --background: #f5f5f0;
   --foreground: #14142b;
@@ -136,6 +139,7 @@
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 .dark[data-ui="advanced"] {
+  color-scheme: dark;
   --background: #101017;
   --foreground: #ededf3;
   --card: #181822;
@@ -212,6 +216,7 @@
 @layer base {
   * { @apply border-border outline-ring/50; }
   html, body, #root { height: 100%; }
+  html { color: var(--foreground); }
   body {
     @apply bg-background text-foreground;
     overflow-x: hidden;
