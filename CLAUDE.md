@@ -43,7 +43,7 @@ python main.py
 
 **Runs locally** on the developer's Windows machine. No server, Docker, or cloud deployment.
 
-**No test runner, no linter, no CI configured yet.** To verify a change: `python -c "from coinowl.bot.main import run; print('OK')"`.
+**Tests + CI:** `pip install -r requirements-dev.txt`, then `pytest -q` (pure-function unit tests in `tests/`) and `ruff check --select E9,F63,F7,F82 .` (real errors only). Import smoke test: `python -c "from coinowl.bot.main import run; print('OK')"`. GitHub Actions (`.github/workflows/ci.yml`) runs all three on every PR and every push to `main`.
 
 ---
 
@@ -196,7 +196,7 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **`/admin` is gated, not authenticated.** Live in `coinowl/bot/admin.py`. Sender is checked against `settings.admin_user_id`; non-admins get a silent no-op (the handler returns before sending anything). Subcommands: `/admin users [N]` (top N by last_seen with cap + window usage), `/admin info <uid>` (full profile), `/admin setlimit <uid> <N>` (writes `users.quota_override`), `/admin unsetlimit <uid>` (clears it), `/admin clearquota <uid>` (deletes `quota_log` rows for that user — frees them up immediately). Quota override survives restart (DB-backed); `check_and_consume` reads it on every message. Output is HTML; user-controlled fields run through `html.escape()` via `_esc()`.
 
-- **No test suite.** `tests/__init__.py` exists but is empty. Before committing logic changes, run a quick import smoke test: `python -c "from coinowl.bot.main import run"`.
+- **Known guardrail gaps are strict xfails.** Cases marked `xfail(strict=True)` in `tests/` are confirmed misses in the guardrail regexes and the chart router, each with its reason. Fixing a pattern makes its case XPASS, which fails CI — remove the marker in the same commit.
 
 ---
 
@@ -227,7 +227,7 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - News fetcher + `knowledge_chunks` RAG (CoinDesk RSS source decided; subsystem unbuilt)
 - `coins` table + `/similar` tool (needs CoinGecko coin-detail bootstrap)
 - Server-side cache of generated charts (re-renders identical chart/HTML on every call today)
-- Any tests or CI
+- Tests for yes-expansion and quota math (`tests/` covers pure functions only)
 
 ---
 
@@ -250,7 +250,7 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 - **Tool errors are dicts.** If adding a new tool branch in `execute_tool()`, return `{"error": "..."}` on failure — do not raise.
 - **Safety is non-negotiable.** Never remove or weaken the guardrail patterns in `agent/main.py` or the prediction/advice prohibitions in `SYSTEM_PROMPT`.
 - **Georgian is first-class.** Any change that might affect multilingual behavior needs explicit verification.
-- **No tests exist.** Don't add test stubs or pytest scaffolding unless the user asks. Do run import smoke tests before committing.
+- **Run `pytest -q` and the import smoke test before committing.** Tests stay pure-function: no network, DB, or LLM calls, and no mocking scaffolding unless the user asks. Never loosen a guardrail test to get CI green — mark a real miss `xfail(strict=True)` with its reason and report it.
 - **Commit after each logical unit.** Don't batch unrelated changes.
 - **No SQLite.** Persistence target is Supabase (Postgres + pgvector). Don't introduce a SQLite intermediate.
 - **No email/password auth.** `event.sender_id` (Telegram user_id) is identity. Passwords typed in Telegram are visible in chat history and log files.
