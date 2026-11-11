@@ -67,9 +67,9 @@ _OFF_TOPIC_PATTERNS: list[re.Pattern[str]] = [
 
     # === Transactional how-to (scam-enabling content) ===
     # English instructional language tied to crypto transfer actions
-    re.compile(r"\bwallet\s+address\b", re.IGNORECASE),
-    re.compile(r"\bnetwork\s+fee\b", re.IGNORECASE),
-    re.compile(r"\bgas\s+fee\b", re.IGNORECASE),
+    re.compile(r"\bwallet\s+address(es)?\b", re.IGNORECASE),
+    re.compile(r"\bnetwork\s+fees?\b", re.IGNORECASE),
+    re.compile(r"\bgas\s+fees?\b", re.IGNORECASE),
     re.compile(r"\bSend\s*/\s*Withdraw\b", re.IGNORECASE),
     re.compile(r"\b(send|withdraw|swap)\s+button\b", re.IGNORECASE),
     re.compile(r"\b(paste|enter|copy)\b[^\.]{0,40}\b(address|wallet)\b", re.IGNORECASE),
@@ -88,6 +88,7 @@ _OFF_TOPIC_PATTERNS: list[re.Pattern[str]] = [
 
     # Georgian transactional patterns (ქართული)
     re.compile(r"მიმღების\s+(address|wallet|მისამართი)", re.IGNORECASE),
+    re.compile(r"საფულ(ის|ეების)\s+მისამართ"),                         # "wallet address", any case
     re.compile(r"(ჩასვი|ჩაწერე|დააკოპირე)[^\.]{0,40}(address|მისამართი|wallet|საფულე)", re.IGNORECASE),
     re.compile(r"(დააჭირე|აირჩიე)[^\.]{0,40}(Send|Withdraw|გაგზავნე|გადარიცხე)", re.IGNORECASE),
     re.compile(r"ეტაპობრივად[^\.]{0,120}(გაგზავნ|გადარიცხ|ამოღებ)", re.IGNORECASE),
@@ -95,7 +96,8 @@ _OFF_TOPIC_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"სატესტო\s+(თანხ|ტრანზაქცი)", re.IGNORECASE),       # "test transaction/amount"
 
     # Russian transactional patterns
-    re.compile(r"\bадрес\s+(кошел[её]к|получател)", re.IGNORECASE),
+    # "адрес кошелька" is the everyday form (genitive), not "адрес кошелёк".
+    re.compile(r"\bадрес\w*\s+(кошел[её]к|кошельк|получател)", re.IGNORECASE),
     re.compile(r"\b(вставь|введи|укажи|скопируй)[^\.]{0,40}\b(адрес|кошел[её]к)", re.IGNORECASE),
     re.compile(r"\b(нажми|кликни|жми)[^\.]{0,40}\b(send|withdraw|отправ|вывест|подтверд)", re.IGNORECASE),
     re.compile(r"пошагово[^\.]{0,120}(перевод|отправ|вывод|обмен)", re.IGNORECASE),

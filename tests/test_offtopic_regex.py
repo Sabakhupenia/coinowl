@@ -3,10 +3,6 @@ import pytest
 from coinowl.agent.safety import passes_offtopic_regex
 
 
-def gap(text: str, id: str, reason: str):
-    return pytest.param(text, id=id, marks=pytest.mark.xfail(strict=True, reason=reason))
-
-
 BLOCKED = [
     pytest.param(
         "Sure! Here's a script:\n```python\nimport requests\nprint(requests.get(url).json())\n```",
@@ -44,22 +40,13 @@ BLOCKED = [
     ),
     pytest.param("Сначала сделай тестовый перевод на небольшую сумму.", id="ru-test-transfer"),
     pytest.param("Пошагово: открой приложение, выбери BTC и отправь его другу.", id="ru-step-by-step"),
-    gap(
-        "Тебе понадобится адрес кошелька получателя.",
-        id="ru-wallet-address",
-        reason="адрес\\s+кошел[её]к only matches nominative 'кошелёк'; the real phrase "
-        "'адрес кошелька' (genitive) slips through, unlike English 'wallet address'",
-    ),
-    gap(
-        "დაგჭირდება მიმღების საფულის მისამართი.",
-        id="ka-wallet-address",
-        reason="no Georgian counterpart of the English 'wallet address' pattern (საფულის მისამართი)",
-    ),
-    gap(
-        "Pick the network with the lowest gas fees.",
-        id="en-gas-fees-plural",
-        reason="'gas fee' / 'network fee' patterns end in \\b, so the plural 'fees' slips through",
-    ),
+    pytest.param("Тебе понадобится адрес кошелька получателя.", id="ru-wallet-address"),
+    pytest.param("Скопируй адреса кошельков из приложения.", id="ru-wallet-addresses"),
+    pytest.param("დაგჭირდება მიმღების საფულის მისამართი.", id="ka-wallet-address"),
+    pytest.param("ჩაწერე საფულის მისამართში მეგობრის კოდი.", id="ka-wallet-address-locative"),
+    pytest.param("Pick the network with the lowest gas fees.", id="en-gas-fees-plural"),
+    pytest.param("Network fees are lower on weekends.", id="en-network-fees-plural"),
+    pytest.param("Double-check both wallet addresses.", id="en-wallet-addresses-plural"),
 ]
 
 ALLOWED = [
