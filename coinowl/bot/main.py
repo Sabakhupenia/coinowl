@@ -382,9 +382,6 @@ def _user_context_block(db_user: dict, *, remaining: int) -> str | None:
             "follow-up offer (no 'shall I check anything else?', no 'want me to look "
             "at X too?'). Deliver a complete answer and stop."
         )
-    parts.append(
-        "Address them by name naturally — sprinkle it in once or twice, not every sentence."
-    )
     return "\n".join(parts)
 
 
