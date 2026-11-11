@@ -43,6 +43,8 @@ python main.py
 
 **Runs locally** on the developer's Windows machine. No server, Docker, or cloud deployment.
 
+**Web app** (`web/`, v0.8.0, sample data only — no backend yet): `cd web && npm install && npm run dev`. Vite + React + Tailwind + shadcn. Standard layout (V2 gold/navy) by default; advanced workbench layout behind a switch on wide screens. Site language (EN/KA) is a per-device UI pref and is separate from the bot's `preferred_languages`. See `web/README.md`.
+
 **Tests + CI:** `pip install -r requirements-dev.txt`, then `pytest -q` (pure-function unit tests in `tests/`) and `ruff check --select E9,F63,F7,F82 .` (real errors only). Import smoke test: `python -c "from coinowl.bot.main import run; print('OK')"`. GitHub Actions (`.github/workflows/ci.yml`) runs all three on every PR and every push to `main`.
 
 ---
