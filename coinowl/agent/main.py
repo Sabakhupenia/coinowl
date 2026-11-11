@@ -36,7 +36,13 @@ from coinowl.agent.prompts import (
     guardrail_refusal,
     offtopic_refusal,
 )
-from coinowl.agent.safety import TopicClassifier, passes_offtopic_regex
+from coinowl.agent.safety import (
+    VERDICT_OFF_TOPIC,
+    VERDICT_OK,
+    VERDICT_PREDICTION,
+    TopicClassifier,
+    passes_offtopic_regex,
+)
 from coinowl.core.logging import get_logger
 from coinowl.data.coingecko import (
     ATTRIBUTION,
@@ -59,15 +65,23 @@ _CLAUDE_MODEL = "claude-haiku-4-5"
 # this split is just to conserve Gemini's per-day quota for messages where the
 # user is explicitly asking for a chart.
 _CHART_INTENT_RE = re.compile(
-    r"\b(chart|graph|plot|visuali[sz]e|html|interactive)\b"
-    r"|ჩარტი|გრაფიკი|ნახაზი|ვიზუალ|ინტერაქტიულ"
+    r"\b(charts?|charting|graphs?|plot(s|ted|ting)?|visuali[sz]\w*|html|interactive)\b"
+    r"|ჩარტ|ნახაზ|ვიზუალ|ინტერაქტიულ"
     r"|график|диаграмм|чарт|визуализ|интерактивн",
     re.IGNORECASE,
 )
 
+# "გრაფიკი" is both "chart" and "schedule". Charts aren't stored, so next to
+# have / cancel / delete it's the schedule ("რა გრაფიკი მაქვს", "გააუქმე
+# გრაფიკი").
+_KA_GRAPH_RE = re.compile(r"გრაფიკ")
+_KA_SCHEDULE_VERB_RE = re.compile(r"მაქვს|გაქვს|უქმ|წაშალ|შეაჩერ")
+
 
 def wants_chart(text: str) -> bool:
-    return bool(_CHART_INTENT_RE.search(text))
+    if _CHART_INTENT_RE.search(text):
+        return True
+    return bool(_KA_GRAPH_RE.search(text)) and not _KA_SCHEDULE_VERB_RE.search(text)
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -120,20 +134,147 @@ _MAX_OUTPUT_TOKENS = 2048
 # comma-separated number (e.g. 80,000), or a price-phrase like "new highs"
 # / "ATH" / "the moon". Layer 2 (LLM-as-judge) catches predictions that
 # slip past these patterns.
+_WORD = r"[^\s.,!?;:—]+"  # one word, no punctuation: keeps a match inside one clause
+
+_RU_TRADE = (
+    r"(?:купить|покупать|докуп(?:ить|ать)|закуп(?:ить|иться|аться)|прикупить"
+    r"|продать|продавать|держать|удерживать|холдить)"
+)
+_KA_TRADE = r"(?:იყიდო|გაყიდო|შეიძინო|შეინახო|დაიტოვო|შეინარჩუნო|დაიჭირო)"
+_KA_TRADE_NOUN = r"(?:გაყიდვ|ყიდვ|შეძენ|შენახვ|საყიდლ|შესაძენ|გასაყიდ)"
+
 _PREDICTION_PATTERNS = [
     re.compile(r"\bwill (reach|hit|go to|be)\s+\$", re.IGNORECASE),                    # "will hit $80k"
     re.compile(r"\bwill (reach|hit|go to|be)\s+\d+\s*[kKmM]\b", re.IGNORECASE),          # "will hit 80k"
     re.compile(r"\bwill (reach|hit|go to|be)\s+\d{1,3},\d{3}", re.IGNORECASE),           # "will reach 80,000"
-    re.compile(r"\bwill (reach|hit|go to|be)\s+(new\s+(highs?|lows?|ATHs?)|the moon|all[-\s]?time)\b", re.IGNORECASE),
+    re.compile(
+        r"\bwill (reach|hit|go to|be)\s+((a|an|the|its)\s+)?"
+        r"(new\s+(highs?|lows?|ATHs?)|the moon|(new\s+)?all[-\s]?time)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bshould (buy|sell|hold)\b", re.IGNORECASE),
-    re.compile(r"\b(i|my)['’]?d? recommend\b", re.IGNORECASE),
+    re.compile(
+        r"\b(i|my)['’]?d?(\s+would)?"
+        r"(\s+(strongly|highly|really|personally|definitely|certainly|honestly|still|also|do))*"
+        r"\s+recommend",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bprice target\b", re.IGNORECASE),
     re.compile(r"\bis going to \$", re.IGNORECASE),
+    # Russian advice. "стоит ли покупать" (whether to buy) is how a refusal
+    # is worded, so "ли" can't sit between the modal and the verb.
+    re.compile(
+        rf"\b(стоит|следует|нужно|надо|пора|лучше|рекомендую|советую)\s+"
+        rf"((?!ли\b){_WORD}\s+){{0,3}}?{_RU_TRADE}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bя\s+бы\s+({_WORD}\s+){{0,3}}?"
+        r"(купил|продал|держал|докупил|рекомендовал|советовал|посоветовал)",
+        re.IGNORECASE,
+    ),
+    # Georgian advice. "ღირს" also means "costs", so it only counts next to
+    # a buy/sell noun.
+    re.compile(
+        rf"(უნდა|სჯობს|ჯობს|ჯობია|აჯობებს|უკეთესია|უმჯობესია)\s+({_WORD}\s+){{0,2}}?{_KA_TRADE}"
+    ),
+    re.compile(
+        rf"ღირს\s+({_WORD}\s+)?{_KA_TRADE_NOUN}|{_KA_TRADE_NOUN}[ა-ჰ]*\s+({_WORD}\s+)?ღირს"
+    ),
+    re.compile(rf"გირჩევ[ა-ჰ]*,?\s+({_WORD}\s+){{0,2}}?({_KA_TRADE}|{_KA_TRADE_NOUN})"),
+    re.compile(r"(ვიყიდდი|გავყიდდი|შევიძენდი|შევინახავდი|დავიტოვებდი|დავიჭერდი)"),
+]
+
+# Georgian and Russian use the same future form for a forecast ("BTC 80k-ს
+# მიაღწევს", "BTC дойдёт до 80k") and for the when-clause of an alert
+# confirmation ("…როცა BTC 80k-ს მიაღწევს", "…когда BTC дойдёт до 80k"), so
+# their price-target patterns run on the text with when/if clauses cut out.
+# English doesn't need this: its when-clauses take the present tense
+# ("when BTC hits 80k"), which the "will …" patterns above never match. The
+# English conjunctions are listed because gpt-5.4-mini code-mixes
+# ("მოგწერ when BTC 100,000 USD-ს ზემოთ ავა").
+_CLAUSE_REST = r"([^.!?\n,;—–]|(?<=\d)[.,](?=\d))*"  # to the clause end; 80,000 stays whole
+_WHEN_IF_CLAUSE_RE = re.compile(
+    r"(\b(когда(?!-)|если|как\s+только)\b|\b(როცა|როდესაც|როგორც\s+კი|თუკი|თუ)\b"
+    r"|\b(when|if|once|as\s+soon\s+as)\b)" + _CLAUSE_REST,
+    re.IGNORECASE,
+)
+
+# "I don't make predictions, including whether BTC will hit 100k" is how the
+# model refuses; a whether-clause never asserts anything, in any pattern.
+_WHETHER_CLAUSE_RE = re.compile(r"\bwhether\b" + _CLAUSE_REST, re.IGNORECASE)
+
+# Georgian also says "when" with a mid-clause "რომ" ("BTC რომ 80k-ს
+# მიაღწევს, …"). After a comma "რომ" is "that" ("ვფიქრობ, რომ …"), which is
+# how a forecast is hedged, so only the comma-less form is exempt.
+_KA_NOT_WHEN = r"((?<!რომ )|(?<=, რომ ))(?<![\d.,$])"
+
+_PRICE = (
+    r"(\$\s?\d[\d.,]*(\s?[kKmMbBtT](?![A-Za-z]))?"           # $100,000 / $80k / $2T
+    r"|\d[\d.,]*\s?([kKmM](?![A-Za-z])|тыс|млн|ათას|მილიონ)"  # 80k / 100 тыс / 100 ათასი
+    r"|\d[\d.,]*[кК](?![а-яё])"                               # 80к
+    # Models write "100 000" with a no-break or narrow no-break space.
+    r"|\d{1,3}([, \t\xa0\u202f]\d{3})+(\s?(доллар\w*|usd|დოლარ[ა-ჰ]*))?"  # 80,000 / 80 000
+    r"|\d[\d.,]*\s?(доллар\w*|usd|დოლარ[ა-ჰ]*))"              # 5000 долларов
+)
+_RU_INF = (
+    r"(достичь|достигнуть|вырасти\s+до|подняться\s+до|упасть\s+до|опуститься\s+до"
+    r"|дойти\s+до|стоить|пробить|превысить)"
+)
+_RU_WILL = (
+    r"(достигн(ет|ут)|дойд[её]т\s+до|выраст(ет|ут)\s+до|поднимется\s+(до|выше)"
+    r"|упад[её]т\s+(до|ниже)|опустится\s+(до|ниже)|снизится\s+до|рухнет\s+до"
+    r"|обвалится\s+до|взлетит\s+(до|выше)|подскочит\s+до|пробь[её]т|превысит"
+    r"|преодолеет|верн[её]тся\s+к|станет|увид(ит|им)"
+    r"|будет(\s+(стоить|уже|около|примерно|выше|ниже))?"
+    rf"|(может|могут|должен|должна|должно|должны)\s+{_RU_INF})"
+)
+_KA_WILL = (
+    r"(მიაღწევ(ს|ენ)|გაიზრდება|აიწევს|\bავა\b|დაეცემა|ჩამოვა|დაიწევს|გადავა"
+    r"|გადააჭარბებს|გადალახავს|გასცდება|დაუბრუნდება|დაბრუნდება|შეეხება"
+    r"|დაინახავს|ნახავს)"
+)
+
+_FUTURE_PRICE_PATTERNS = [
+    re.compile(                                                # "достигнет $100,000"
+        rf"\b{_RU_WILL}\s+((отметк|уровн|планк|рубеж)\w*\s+)?(в\s+)?{_PRICE}",
+        re.IGNORECASE,
+    ),
+    re.compile(                                                # "идёт к $100k"
+        rf"\b(ид[её]т|движется|направляется)\s+к\s+(отметке\s+(в\s+)?)?{_PRICE}",
+        re.IGNORECASE,
+    ),
+    re.compile(                                                # "обновит исторический максимум"
+        rf"\b(обновит|установит|достигн(ет|ут)|побь[её]т)\s+({_WORD}\s+){{0,2}}?"
+        r"(максимум|минимум|рекорд|ATH)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(улетит|полетит|взлетит)\s+на\s+луну", re.IGNORECASE),
+    re.compile(                                                # "$100,000-ს მიაღწევს"
+        rf"{_KA_NOT_WHEN}{_PRICE}(-?[ა-ჰ]+)?(\s+(?!რომ\b){_WORD}){{0,2}}?\s+{_KA_WILL}",
+        re.IGNORECASE,
+    ),
+    re.compile(                                                # "მიაღწევს $100,000-ს"
+        rf"{_KA_NOT_WHEN}{_KA_WILL}(\s+{_WORD}){{0,2}}?\s+{_PRICE}",
+        re.IGNORECASE,
+    ),
+    # "$100k იქნება" / "ეღირება $100k". Not "$80,000-ზე იქნება დაყენებული"
+    # (the alert will be set at $80,000): a price in a locative case isn't
+    # the predicate.
+    re.compile(
+        rf"{_KA_NOT_WHEN}{_PRICE}(?<!ზე)(?<!მდე)(?<!ში)\s+(იქნება|ეღირება|გახდება)(?![ა-ჰ])"
+        rf"|(?<![ა-ჰ])(იქნება|ეღირება|გახდება)\s+{_PRICE}",
+        re.IGNORECASE,
+    ),
 ]
 
 
 def passes_guardrail(text: str) -> bool:
-    return not any(p.search(text) for p in _PREDICTION_PATTERNS)
+    asserted = _WHETHER_CLAUSE_RE.sub(" ", text)
+    if any(p.search(asserted) for p in _PREDICTION_PATTERNS):
+        return False
+    main_clauses = _WHEN_IF_CLAUSE_RE.sub(" ", asserted)
+    return not any(p.search(main_clauses) for p in _FUTURE_PRICE_PATTERNS)
 
 
 _DELIVERABLE_KEYS = ("chart_png", "chart_html", "sparkline_png")
@@ -2391,20 +2532,26 @@ class Agent:
             return AgentResult(text=guardrail_refusal(user_languages))
 
         # Off-topic safety: Layer 1 (regex) is cheap + deterministic; Layer 2
-        # (LLM-as-judge) catches what the regex misses. Both swap in the
-        # localized OFFTOPIC_REFUSAL on hit. Emergency-safety redirects are
-        # explicitly allowed by both layers (see coinowl/agent/safety.py).
+        # (LLM-as-judge) catches what the regexes miss, including predictions
+        # the patterns above don't spell out. Each swaps in the matching
+        # localized refusal on hit. Emergency-safety redirects are explicitly
+        # allowed by both layers (see coinowl/agent/safety.py).
         if not passes_offtopic_regex(text):
             log.warning(
                 "Off-topic regex tripped on model output: {!r}", text[:200]
             )
             return AgentResult(text=offtopic_refusal(user_languages))
         try:
-            on_topic = await self._classifier.is_on_topic(text)
+            verdict = await self._classifier.classify(text)
         except Exception as exc:  # noqa: BLE001
             log.warning("topic classifier raised: {}; failing open", exc)
-            on_topic = True
-        if not on_topic:
+            verdict = VERDICT_OK
+        if verdict == VERDICT_PREDICTION:
+            log.warning(
+                "Topic classifier flagged PREDICTION on output: {!r}", text[:200]
+            )
+            return AgentResult(text=guardrail_refusal(user_languages))
+        if verdict == VERDICT_OFF_TOPIC:
             log.warning(
                 "Topic classifier flagged OFF_TOPIC on output: {!r}", text[:200]
             )

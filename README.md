@@ -67,7 +67,7 @@ Three independent guardrails layered on the bot's reply path. Each can independe
 
 2. **Output regex filter** — [`coinowl/agent/safety.py`](coinowl/agent/safety.py) `passes_offtopic_regex`. Deterministic check on the LLM's output catching code blocks, programming keywords, dosage/recipe markers, wallet-transfer instructions, and exchange-recommendation patterns in EN/KA/RU. Fires before the reply ever leaves the bot.
 
-3. **LLM-as-judge classifier** — [`coinowl/agent/safety.py`](coinowl/agent/safety.py) `TopicClassifier.is_on_topic`. A small one-shot LLM call re-reads each generated reply against a fixed allow/deny scope (crypto stats + bot features + safety refusals + social courtesies + onboarding interactions = allowed; transactional how-to / code / recipes / generic advice = OFF_TOPIC). OpenAI primary, Gemini fallback, fails open on classifier error (regex has already done deterministic gating).
+3. **LLM-as-judge classifier** — [`coinowl/agent/safety.py`](coinowl/agent/safety.py) `TopicClassifier.classify`. A small one-shot LLM call re-reads each generated reply against a fixed allow/deny scope (crypto stats + bot features + safety refusals + small talk + onboarding interactions = OK; price predictions / buy-sell-hold advice in any language = PREDICTION; transactional how-to / code / recipes / generic advice = OFF_TOPIC). OpenAI primary, Gemini fallback, fails open on classifier error (regex has already done deterministic gating).
 
 Refusal language is auto-selected from the user's `preferred_languages`, with script-detection fallback for users still in onboarding (Georgian/Cyrillic glyphs in the user's current message trigger localized refusal even before the profile is stored).
 
