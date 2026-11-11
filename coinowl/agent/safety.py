@@ -51,8 +51,10 @@ _OFF_TOPIC_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*#include\b", re.MULTILINE),
     re.compile(r"\b(public|private|protected)\s+(class|void|int|string)\b", re.IGNORECASE),
     re.compile(r"=>\s*\{", re.MULTILINE),  # arrow functions
-    # Dosages / specific medical advice (general "call emergency services" is fine)
-    re.compile(r"\b\d+\s*(mg|ml|mcg|grams?)\b", re.IGNORECASE),
+    # Dosages / specific medical advice (general "call emergency services" is fine).
+    # Lowercase units on the same line as the number only: GRAM and ML are
+    # tickers, so "Rank: #115\n\nGRAM is at…" and "1 GRAM = $1.25" are stats.
+    re.compile(r"\b\d+[ \t]*(mg|m[lL]|mcg|grams?)\b"),
     re.compile(r"\b(dosage|prescription|prescribe)\b", re.IGNORECASE),
     re.compile(r"\b(inject|swallow|administer)\s+\d", re.IGNORECASE),
     # Recipes
@@ -72,8 +74,14 @@ _OFF_TOPIC_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(click|press|tap|hit)\b[^\.]{0,40}\b(send|withdraw|confirm)\b", re.IGNORECASE),
     re.compile(r"\bstep\s*[-]?\s*by\s*[-]?\s*step\b[^\.]{0,80}\b(send|transfer|withdraw|buy)\b", re.IGNORECASE),
     re.compile(r"\b(test\s+transaction|small\s+test\s+amount)\b", re.IGNORECASE),
-    # Specific wallet / exchange names — out-of-scope to recommend
-    re.compile(r"\b(Trust\s*Wallet|MetaMask|Phantom|Coinbase\s+Wallet|Ledger\s+Live)\b", re.IGNORECASE),
+    # Specific wallet / exchange names — out-of-scope to recommend. "Trust
+    # Wallet" is also CoinGecko's name for the TWT coin, so it's let through
+    # when it sits next to its ticker (as top-movers rows print it).
+    re.compile(
+        r"\b((?<!TWT \()Trust\s*Wallet(?!\s+Token\b|\s*\(TWT\))"
+        r"|MetaMask|Phantom|Coinbase\s+Wallet|Ledger\s+Live)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(on\s+Binance|on\s+Coinbase|on\s+Kraken|on\s+Bybit|on\s+OKX)\b", re.IGNORECASE),
 
     # Georgian transactional patterns (ქართული)
