@@ -3,10 +3,6 @@ import pytest
 from coinowl.agent.safety import passes_offtopic_regex
 
 
-def gap(text: str, id: str, reason: str):
-    return pytest.param(text, id=id, marks=pytest.mark.xfail(strict=True, reason=reason))
-
-
 BLOCKED = [
     pytest.param(
         "Sure! Here's a script:\n```python\nimport requests\nprint(requests.get(url).json())\n```",
@@ -20,6 +16,8 @@ BLOCKED = [
         id="recipe",
     ),
     pytest.param("Take 500 mg of ibuprofen every 6 hours.", id="dosage-mg"),
+    pytest.param("Give the child 5 mL of the syrup twice a day.", id="dosage-ml"),
+    pytest.param("Don't go over 4 grams of paracetamol a day.", id="dosage-grams"),
     pytest.param("The usual dosage for adults is two tablets.", id="dosage-word"),
     pytest.param("Honestly, you should hire a lawyer and sue them.", id="legal-advice"),
     pytest.param(
@@ -29,6 +27,7 @@ BLOCKED = [
     pytest.param("You'll need the recipient's wallet address.", id="en-wallet-address"),
     pytest.param("Send a small test amount first to be safe.", id="en-test-amount"),
     pytest.param("You can buy it on Binance in a few minutes.", id="en-exchange-name"),
+    pytest.param("Trust Wallet is a good choice for beginners.", id="en-wallet-app-name"),
     pytest.param(
         "გახსენი საფულე, ჩასვი მიმღების მისამართი და დააჭირე Send-ს.",
         id="ka-wallet-howto",
@@ -41,22 +40,13 @@ BLOCKED = [
     ),
     pytest.param("Сначала сделай тестовый перевод на небольшую сумму.", id="ru-test-transfer"),
     pytest.param("Пошагово: открой приложение, выбери BTC и отправь его другу.", id="ru-step-by-step"),
-    gap(
-        "Тебе понадобится адрес кошелька получателя.",
-        id="ru-wallet-address",
-        reason="адрес\\s+кошел[её]к only matches nominative 'кошелёк'; the real phrase "
-        "'адрес кошелька' (genitive) slips through, unlike English 'wallet address'",
-    ),
-    gap(
-        "დაგჭირდება მიმღების საფულის მისამართი.",
-        id="ka-wallet-address",
-        reason="no Georgian counterpart of the English 'wallet address' pattern (საფულის მისამართი)",
-    ),
-    gap(
-        "Pick the network with the lowest gas fees.",
-        id="en-gas-fees-plural",
-        reason="'gas fee' / 'network fee' patterns end in \\b, so the plural 'fees' slips through",
-    ),
+    pytest.param("Тебе понадобится адрес кошелька получателя.", id="ru-wallet-address"),
+    pytest.param("Скопируй адреса кошельков из приложения.", id="ru-wallet-addresses"),
+    pytest.param("დაგჭირდება მიმღების საფულის მისამართი.", id="ka-wallet-address"),
+    pytest.param("ჩაწერე საფულის მისამართში მეგობრის კოდი.", id="ka-wallet-address-locative"),
+    pytest.param("Pick the network with the lowest gas fees.", id="en-gas-fees-plural"),
+    pytest.param("Network fees are lower on weekends.", id="en-network-fees-plural"),
+    pytest.param("Double-check both wallet addresses.", id="en-wallet-addresses-plural"),
 ]
 
 ALLOWED = [
@@ -81,6 +71,24 @@ ALLOWED = [
         id="en-market-stats",
     ),
     pytest.param("Got it — I'll ping you when BTC hits 80k 👀", id="en-alert-confirmation"),
+    # Refused in production: the dosage pattern read "#115\n\nGRAM" as grams.
+    pytest.param(
+        "No — GRAM is not the top 1 gainer today.\n\n"
+        "Top 1 24h gainer right now is QFI (Quantix Finance) 📈\n"
+        "Price: $999.24\n24h change: +31,856.03%\nMarket cap rank: #115\n\n"
+        "GRAM is at $1.25.\n\n"
+        "Data: CoinGecko (https://www.coingecko.com)\nWant the top 5 gainers too?",
+        id="en-gram-ticker-after-rank",
+    ),
+    pytest.param("1 GRAM = $1.25, so $100 buys about 80 GRAM.", id="en-gram-ticker-amount"),
+    pytest.param("ML (Mintlayer) is at $0.021 — 100 ML is about $2.10.", id="en-ml-ticker-amount"),
+    pytest.param(
+        "Top gainers (24h):\n• TWT (Trust Wallet) +12.3%\n• GRAM +8.1%",
+        id="en-twt-coin-in-top-movers",
+    ),
+    pytest.param("Trust Wallet (TWT) is at $0.39, up 2.1% in 24h.", id="en-twt-coin-price"),
+    pytest.param("GRAM ახლა $1.25-ია, ანუ 100 GRAM დაახლოებით $125 ღირს.", id="ka-gram-ticker-amount"),
+    pytest.param("Сейчас 1 GRAM стоит $1.25.", id="ru-gram-ticker-amount"),
     pytest.param(
         "I'm only a crypto stats bot, but if someone's life is in danger, call 112 right now.",
         id="en-emergency-redirect",

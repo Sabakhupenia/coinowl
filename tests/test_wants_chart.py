@@ -3,15 +3,6 @@ import pytest
 from coinowl.agent.main import wants_chart
 
 
-def gap(text: str, id: str, reason: str):
-    return pytest.param(text, id=id, marks=pytest.mark.xfail(strict=True, reason=reason))
-
-
-_KA_NOMINATIVE = (
-    "Georgian terms carry the nominative -ი ending, so other forms (dative გრაფიკს, "
-    "plural ჩარტები) don't match; ვიზუალ / ინტერაქტიულ are bare stems and do"
-)
-
 CHART = [
     pytest.param("show me a BTC chart", id="en-chart"),
     pytest.param("ETH graph for the last 30 days", id="en-graph"),
@@ -32,14 +23,13 @@ CHART = [
     pytest.param("скинь чарт SOL", id="ru-chart"),
     pytest.param("визуализируй ADA", id="ru-visualize"),
     pytest.param("интерактивную версию, пожалуйста", id="ru-interactive"),
-    gap(
-        "show me BTC and ETH charts",
-        id="en-plural",
-        reason="English words sit inside \\b...\\b, so inflected forms "
-        "(charts, graphs, plots, visualization) don't match",
-    ),
-    gap("ETH-ის გრაფიკს მაჩვენებ?", id="ka-dative", reason=_KA_NOMINATIVE),
-    gap("BTC-ის და ETH-ის ჩარტები მაჩვენე", id="ka-plural", reason=_KA_NOMINATIVE),
+    pytest.param("show me BTC and ETH charts", id="en-plural"),
+    pytest.param("graphs for SOL and ADA", id="en-graphs"),
+    pytest.param("plotting DOGE over 90 days", id="en-plotting"),
+    pytest.param("a visualization of BTC this month", id="en-visualization"),
+    pytest.param("ETH-ის გრაფიკს მაჩვენებ?", id="ka-dative"),
+    pytest.param("BTC-ის და ETH-ის ჩარტები მაჩვენე", id="ka-plural"),
+    pytest.param("BTC-ის გრაფიკები 30 დღეზე", id="ka-graph-plural"),
 ]
 
 NOT_CHART = [
@@ -51,6 +41,11 @@ NOT_CHART = [
     pytest.param("summarize BTC's week in one paragraph", id="en-word-boundary"),
     pytest.param("BTC-ის ფასი რა არის?", id="ka-price"),
     pytest.param("ETH როგორ იყო ამ კვირაში?", id="ka-weekly-stats"),
+    # გრაფიკი also means "schedule"; these list or cancel scheduled pushes.
+    pytest.param("რა გრაფიკი მაქვს?", id="ka-schedule-list"),
+    pytest.param("რა გრაფიკები მაქვს ჩართული?", id="ka-schedule-list-plural"),
+    pytest.param("გააუქმე ყოველდღიური გრაფიკი", id="ka-schedule-cancel"),
+    pytest.param("ორშაბათის გრაფიკი წაშალე", id="ka-schedule-delete"),
     pytest.param("сколько стоит BTC?", id="ru-price"),
     pytest.param("как ETH на этой неделе?", id="ru-weekly-stats"),
 ]
