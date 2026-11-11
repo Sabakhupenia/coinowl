@@ -65,15 +65,23 @@ _CLAUDE_MODEL = "claude-haiku-4-5"
 # this split is just to conserve Gemini's per-day quota for messages where the
 # user is explicitly asking for a chart.
 _CHART_INTENT_RE = re.compile(
-    r"\b(chart|graph|plot|visuali[sz]e|html|interactive)\b"
-    r"|ჩარტი|გრაფიკი|ნახაზი|ვიზუალ|ინტერაქტიულ"
+    r"\b(charts?|charting|graphs?|plot(s|ted|ting)?|visuali[sz]\w*|html|interactive)\b"
+    r"|ჩარტ|ნახაზ|ვიზუალ|ინტერაქტიულ"
     r"|график|диаграмм|чарт|визуализ|интерактивн",
     re.IGNORECASE,
 )
 
+# "გრაფიკი" is both "chart" and "schedule". Charts aren't stored, so next to
+# have / cancel / delete it's the schedule ("რა გრაფიკი მაქვს", "გააუქმე
+# გრაფიკი").
+_KA_GRAPH_RE = re.compile(r"გრაფიკ")
+_KA_SCHEDULE_VERB_RE = re.compile(r"მაქვს|გაქვს|უქმ|წაშალ|შეაჩერ")
+
 
 def wants_chart(text: str) -> bool:
-    return bool(_CHART_INTENT_RE.search(text))
+    if _CHART_INTENT_RE.search(text):
+        return True
+    return bool(_KA_GRAPH_RE.search(text)) and not _KA_SCHEDULE_VERB_RE.search(text)
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
