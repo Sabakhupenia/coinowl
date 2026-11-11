@@ -198,6 +198,8 @@ execute_tool("get_chart", {symbol, days}, cg, side_effects)
 
 - **Known guardrail gaps are strict xfails.** Cases marked `xfail(strict=True)` in `tests/` are confirmed misses in the guardrail regexes and the chart router, each with its reason. Fixing a pattern makes its case XPASS, which fails CI — remove the marker in the same commit.
 
+- **KA/RU price-target patterns run with when/if clauses cut out.** Georgian and Russian use the same future verb for a forecast and for an alert confirmation ("…როცა BTC 80k-ს მიაღწევს", "…когда BTC дойдёт до 80k"), so `passes_guardrail` strips when/if clauses before `_FUTURE_PRICE_PATTERNS` run. Dropping that step refuses every KA/RU alert confirmation. Anything the regexes leave out goes to the Layer-2 judge (`agent/safety.py`), which returns `OK` / `OFF_TOPIC` / `PREDICTION`. Its rubric must stay in line with `SYSTEM_PROMPT`: brief small talk is allowed, forecasts in any language are not.
+
 ---
 
 ## Current state
