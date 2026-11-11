@@ -8,10 +8,12 @@ Two layers, applied in order in `Agent.reply`:
   OFFTOPIC_REFUSAL.
 
   Layer 2 — LLM-as-judge (semantic, ~300-500ms, ~1 small LLM call).
-  `TopicClassifier.is_on_topic` asks a small LLM to categorize the reply.
-  Catches what the regex misses (life advice prose, generic chitchat, etc.).
-  Returns CRYPTO (allow) or OFF_TOPIC (refuse). On classifier error, falls
-  back to allow — Layer 1 has already done deterministic gating.
+  `TopicClassifier.classify` asks a small LLM to categorize the reply.
+  Catches what the regexes miss: off-topic prose (life advice, trivia,
+  transfer walkthroughs) and hedged predictions / advice in any language.
+  Returns OK (allow), OFF_TOPIC or PREDICTION (refuse). Brief small talk is
+  OK — the system prompt asks the bot to answer it warmly. On classifier
+  error, falls back to allow — Layer 1 has already done deterministic gating.
 
 Crucially, EMERGENCY SAFETY REDIRECTS (e.g. "call 112") are explicitly
 allowed by both layers. The bot ALREADY behaves responsibly in genuine
@@ -106,26 +108,58 @@ def passes_offtopic_regex(text: str) -> bool:
     return not any(p.search(text) for p in _OFF_TOPIC_PATTERNS)
 
 
+VERDICT_OK = "ok"
+VERDICT_OFF_TOPIC = "off_topic"
+VERDICT_PREDICTION = "prediction"
+
+# "PREDICTION" alone bills as 7 completion tokens on gpt-5.4-mini; the old
+# limit of 10 occasionally cut verdicts to "OFF" / "CR".
+_VERDICT_MAX_TOKENS = 16
+
+
 _CLASSIFIER_SYSTEM = (
     "You are a content classifier for a Telegram cryptocurrency stats bot. "
     "The bot's allowed scope is:\n"
-    "  • Cryptocurrency prices, statistics, historical data, charts, trends\n"
+    "  • Cryptocurrency prices, statistics, historical data, charts, past and "
+    "    current trends, and plain explanations of market terms (market cap, "
+    "    volume, 24h change)\n"
     "  • Top gainers/losers, market data\n"
     "  • The user's watchlist and market summaries\n"
-    "  • Price alerts and scheduled summaries (setting/listing/cancelling)\n"
+    "  • Price alerts and scheduled summaries (setting/listing/cancelling). "
+    "    'I'll ping you when BTC hits 80k' confirms an alert the user asked "
+    "    for — it is NOT a prediction.\n"
     "  • The bot's own features, commands, version, quota, language support\n"
-    "  • Safety refusals and 'I'm a crypto bot' redirects\n"
+    "  • Safety refusals and 'I'm a crypto bot' redirects — including declining "
+    "    to predict or advise ('I don't make predictions, but here's the 7-day "
+    "    history') and declining to explain transfers or wallet setup while "
+    "    pointing to 'your wallet's official docs' or 'your exchange's help "
+    "    center' (no steps, no named product). Declining is always ALLOWED.\n"
     "  • Emergency safety redirects (e.g. 'call 112' for medical/life-threatening "
     "    situations) — these are RESPONSIBLE behavior and ALLOWED\n"
-    "  • **Social courtesies** — greetings ('hello', 'hi', 'გამარჯობა', "
-    "    'привет'), thanks / acknowledgments ('thanks', 'გმადლობთ', 'спасибо'), "
-    "    farewells ('bye', 'ნახვამდის', 'пока'), brief apologies, and short "
-    "    'I didn't understand' / 'can you rephrase' / 'ვერ მივხვდი' / 'не понял' "
-    "    clarification replies. These are normal conversational glue and ALLOWED, "
-    "    even when they contain zero crypto content.\n"
+    "  • **Small talk** — short friendly replies that carry no information: "
+    "    greetings ('hello', 'გამარჯობა', 'привет'), thanks ('გმადლობთ', "
+    "    'спасибо'), farewells ('bye', 'ნახვამდის', 'пока'), brief apologies, "
+    "    returning a compliment or affection ('Love you too 💛', 'გაიხარე!'), "
+    "    laughing along ('Haha yeah 😄'), 'I'm good, thanks', emoji-only "
+    "    replies, and short 'I didn't understand' / 'can you rephrase' / "
+    "    'ვერ მივხვდი' / 'не понял' clarification replies. These are normal "
+    "    conversational glue and ALLOWED, even when they contain zero crypto "
+    "    content.\n"
     "  • **Onboarding interactions** — when the bot is collecting name, language, "
     "    and coin watchlist from a new user, the reply may not contain crypto "
     "    stats yet but is bot-setup content and ALLOWED.\n"
+    "\n"
+    "The bot must NOT make PREDICTIONS or give ADVICE — it reports what prices "
+    "did and do, never what they will do. In any language, however hedged:\n"
+    "  • Saying or implying where a price is heading: 'BTC will probably "
+    "    double', 'likely to reach $100k', 'should recover soon', 'I expect it "
+    "    to keep rising', price targets, 'to the moon'\n"
+    "  • Recommending buying, selling, holding, or any other investment or "
+    "    trading decision: 'now is a good time to buy', 'I'd take profit "
+    "    here', 'worth holding'\n"
+    "  Past and present facts ('BTC hit a new all-time high yesterday', 'up 12% "
+    "  this month'), alert / schedule confirmations, and replies that decline "
+    "  to predict are NOT predictions.\n"
     "\n"
     "The bot must NOT produce:\n"
     "  • Programming code or scripts (Python, JS, anything — even one-liners)\n"
@@ -134,7 +168,9 @@ _CLASSIFIER_SYSTEM = (
     "  • Recipes or cooking instructions\n"
     "  • Legal advice\n"
     "  • Generic life/relationship/psychological advice\n"
-    "  • Non-crypto chit-chat content\n"
+    "  • Other non-crypto content with substance — answers to general-knowledge "
+    "    questions, jokes, stories, poems, essays, weather, sports, news. "
+    "    (Small talk as described above is not this.)\n"
     "  • **TRANSACTIONAL HOW-TO** — this is the most important rule. The bot "
     "    must NEVER walk through HOW TO send/transfer/buy/sell/withdraw/swap "
     "    crypto, HOW TO set up a wallet, HOW TO use a specific exchange, what "
@@ -147,10 +183,12 @@ _CLASSIFIER_SYSTEM = (
     "    example of OFF_TOPIC even when the topic is 'crypto'.\n"
     "\n"
     "Read the bot reply provided by the user and respond with EXACTLY ONE WORD:\n"
-    "  CRYPTO    — if the reply is entirely within the allowed scope\n"
-    "  OFF_TOPIC — if it contains ANY content outside the allowed scope, "
-    "              EVEN A SINGLE LINE OR SNIPPET tucked at the end. "
-    "              Step-by-step transfer/buy/wallet instructions are OFF_TOPIC.\n"
+    "  OK         — if the reply is entirely within the allowed scope\n"
+    "  PREDICTION — if it contains ANY price prediction or buy/sell/hold advice, "
+    "               EVEN A SINGLE LINE tucked into an otherwise factual reply\n"
+    "  OFF_TOPIC  — if it contains ANY other content outside the allowed scope, "
+    "               EVEN A SINGLE LINE OR SNIPPET tucked at the end. "
+    "               Step-by-step transfer/buy/wallet instructions are OFF_TOPIC.\n"
     "\n"
     "Do not explain. One word only."
 )
@@ -174,8 +212,8 @@ class TopicClassifier:
         self._openai_model = openai_model
         self._gemini_model = gemini_model
 
-    async def is_on_topic(self, reply_text: str) -> bool:
-        """True if the classifier verdict is CRYPTO; True (allow) on error.
+    async def classify(self, reply_text: str) -> str:
+        """One of the VERDICT_* constants; VERDICT_OK (allow) on error.
 
         We fail OPEN on classifier failure — the regex layer ahead of us has
         already deterministically blocked the highest-risk patterns. Failing
@@ -191,7 +229,7 @@ class TopicClassifier:
                         {"role": "system", "content": _CLASSIFIER_SYSTEM},
                         {"role": "user", "content": user_msg},
                     ],
-                    max_completion_tokens=10,
+                    max_completion_tokens=_VERDICT_MAX_TOKENS,
                 )
                 verdict = (resp.choices[0].message.content or "").strip().upper()
                 return _interpret(verdict)
@@ -203,21 +241,24 @@ class TopicClassifier:
                 contents=user_msg,
                 config=genai_types.GenerateContentConfig(
                     system_instruction=_CLASSIFIER_SYSTEM,
-                    max_output_tokens=10,
+                    max_output_tokens=_VERDICT_MAX_TOKENS,
                 ),
             )
             verdict = (resp.text or "").strip().upper()
             return _interpret(verdict)
         except Exception as exc:  # noqa: BLE001
             log.warning("topic classifier Gemini failed: {}", exc)
-        return True  # fail open
+        return VERDICT_OK  # fail open
 
 
-def _interpret(verdict: str) -> bool:
-    """Map the classifier's word to allow/deny. Conservative on ambiguity:
-    only an explicit OFF_TOPIC blocks; anything else (CRYPTO, garbled output,
-    empty) allows. Same reasoning as the fail-open branch — Layer 1 has the
-    safety net."""
-    if "OFF_TOPIC" in verdict or "OFFTOPIC" in verdict:
-        return False
-    return True
+def _interpret(verdict: str) -> str:
+    """Map the classifier's word to a VERDICT_* constant. Conservative on
+    ambiguity: only an explicit OFF_TOPIC or PREDICTION blocks; anything else
+    (OK, garbled output, empty) allows. Same reasoning as the fail-open
+    branch — Layer 1 has the safety net. A verdict cut short by the token
+    limit ("OFF", "PRED") is still explicit: no other label starts that way."""
+    if "OFF_TOPIC" in verdict or "OFFTOPIC" in verdict or verdict.startswith("OFF"):
+        return VERDICT_OFF_TOPIC
+    if "PREDICTION" in verdict or verdict.startswith("PRED"):
+        return VERDICT_PREDICTION
+    return VERDICT_OK
